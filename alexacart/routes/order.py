@@ -43,6 +43,7 @@ class ProposalItem:
     alexa_text: str
     alexa_item_id: str = ""
     alexa_list_id: str = ""
+    alexa_item_version: int = 1
     grocery_item_id: int | None = None
     grocery_item_name: str | None = None
     product_name: str | None = None
@@ -92,7 +93,7 @@ async def start_order(request: Request):
             )
 
         session.total_items = len(items)
-        session.status = "searching"
+        session.status = "logging_in"
 
         for i, item in enumerate(items):
             session.proposals.append(
@@ -101,6 +102,7 @@ async def start_order(request: Request):
                     alexa_text=item.text,
                     alexa_item_id=item.item_id,
                     alexa_list_id=item.list_id,
+                    alexa_item_version=item.version,
                 )
             )
 
@@ -115,7 +117,7 @@ async def start_order(request: Request):
             f'hx-swap="innerHTML">'
             f'<div class="progress-container">'
             f'<div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>'
-            f'<p class="progress-text">Searching Instacart for {len(items)} items...</p>'
+            f'<p class="progress-text">Connecting to Instacart...</p>'
             f"</div></div>"
         )
 
@@ -148,6 +150,16 @@ async def _search_items(session: OrderSession):
     agent = InstacartAgent()
 
     try:
+        # Ensure the user is logged into Instacart before searching
+        session.status = "logging_in"
+        logged_in = await agent.ensure_logged_in()
+        if not logged_in:
+            session.error = "Timed out waiting for Instacart login. Please try again."
+            session.status = "error"
+            return
+
+        session.status = "searching"
+
         for proposal in session.proposals:
             try:
                 match = find_match(db, proposal.alexa_text)
@@ -239,6 +251,26 @@ async def progress_stream(session_id: str):
         session = _sessions.get(session_id)
         if not session:
             yield {"event": "progress", "data": '<div class="status-message status-error">Session not found</div>'}
+            return
+
+        while session.status == "logging_in":
+            yield {
+                "event": "progress",
+                "data": (
+                    '<div class="progress-container">'
+                    '<p class="progress-text">'
+                    "Checking Instacart login... "
+                    "If a browser window opened, please log into Instacart there."
+                    "</p></div>"
+                ),
+            }
+            await asyncio.sleep(3)
+
+        if session.status == "error":
+            yield {
+                "event": "progress",
+                "data": f'<div class="status-message status-error">{session.error}</div>',
+            }
             return
 
         while session.status == "searching":
@@ -405,6 +437,7 @@ async def commit_order(request: Request):
                     item_id=alexa_item_id,
                     text=alexa_text,
                     list_id=proposal.alexa_list_id if proposal else "",
+                    version=proposal.alexa_item_version if proposal else 1,
                 )
                 await alexa_client.mark_complete(alexa_item)
 

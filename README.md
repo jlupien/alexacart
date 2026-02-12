@@ -59,7 +59,11 @@ INSTACART_STORE=Wegmans
 uv run python -m alexacart.alexa.auth login
 ```
 
-This opens a browser window. Log into your Amazon account. Cookies are saved to `<DATA_DIR>/cookies.json`.
+This opens a **separate Chrome window** (not your normal browser) for you to log into Amazon. Even if you're already signed into Amazon in your regular browser, you'll need to sign in again here — nodriver launches its own Chrome instance with a clean profile.
+
+Once you sign in, cookies are automatically captured and saved to `<DATA_DIR>/cookies.json`.
+
+> **macOS users:** You may see a notification saying your terminal app was "prevented from modifying apps on your Mac." This is safe to ignore — nodriver only launches Chrome as a subprocess, it does not modify any apps. If Chrome fails to open, grant your terminal app permission in **System Settings > Privacy & Security > App Management**.
 
 ### Cookie Refresh Sidecar (optional)
 

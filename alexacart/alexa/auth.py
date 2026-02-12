@@ -60,44 +60,60 @@ async def login_interactive() -> dict:
     """
     Open a browser for the user to log into Amazon manually.
     Extracts cookies after successful login.
+
+    Note: nodriver launches a fresh Chrome instance with its own profile,
+    separate from your normal browser. You will need to sign in even if
+    you're already logged into Amazon in your regular browser.
     """
     import nodriver as uc
 
-    browser = await uc.start(headless=False)
-    page = await browser.get(AMAZON_BASE + "/ap/signin")
-
     print("\n=== AlexaCart Login ===")
-    print("Please log into your Amazon account in the browser window.")
-    print("After you're logged in and see the Amazon homepage, press Enter here.")
-    print("(Waiting for login...)")
+    print()
+    print("This will open a Chrome window to log into Amazon.")
+    print()
+    print("NOTE: This launches a separate Chrome instance (not your normal browser),")
+    print("so you will need to sign in even if you're already logged into Amazon.")
+    print()
+    print("macOS users: You may see a notification saying your terminal was")
+    print('"prevented from modifying apps on your Mac". This is safe to ignore —')
+    print("nodriver only launches Chrome as a subprocess, it does not modify any")
+    print("apps. If Chrome fails to open, grant your terminal app permission in")
+    print("System Settings > Privacy & Security > App Management.")
+    print()
 
-    # Wait for the user to log in - poll for Amazon homepage
-    while True:
-        try:
-            current_url = page.url
-            if "amazon.com" in current_url and "/ap/" not in current_url:
-                # User appears to be past the login page
-                await asyncio.sleep(2)  # Give cookies a moment to settle
-                break
-        except Exception:
-            pass
-        await asyncio.sleep(1)
+    browser = await uc.start(headless=False)
 
-    # Extract cookies
+    # Navigate to Amazon homepage. We intentionally don't go to /alexashoppinglists
+    # or /ap/signin because those pages break or show errors without proper session
+    # cookies or query parameters. The homepage always works and has a "Sign In" link.
+    await browser.get(AMAZON_BASE)
+
+    print("Browser opened to amazon.com.")
+    print("Please sign into your Amazon account in the browser window.")
+    print()
+    input("Press Enter here once you are signed in... ")
+
+    # Give cookies a moment to settle after the user confirms
+    await asyncio.sleep(2)
+
+    # Extract cookies from all tabs
     all_cookies = await browser.cookies.get_all()
     cookies = {}
     for cookie in all_cookies:
         if "amazon" in cookie.domain:
             cookies[cookie.name] = cookie.value
 
-    await browser.stop()
+    browser.stop()
+    # Let the event loop process pending subprocess cleanup tasks
+    # to avoid "Event loop is closed" noise from asyncio finalizers.
+    await asyncio.sleep(0.5)
 
     if not cookies:
         raise RuntimeError("No Amazon cookies captured. Login may have failed.")
 
     cookie_data = {"cookies": cookies, "source": "interactive_login"}
     save_cookies(cookie_data)
-    print(f"Login successful! {len(cookies)} cookies saved.")
+    print(f"\nLogin successful! {len(cookies)} cookies saved to {_cookies_path()}")
     return cookie_data
 
 

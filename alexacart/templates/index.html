@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}AlexaCart - Start Order{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>AlexaCart</h1>
+    <p>Automate your grocery ordering from Alexa to Instacart</p>
+</div>
+
+<div class="start-section">
+    <button
+        class="btn btn-primary btn-lg"
+        hx-post="/order/start"
+        hx-target="#order-status"
+        hx-indicator="#spinner"
+    >
+        Start Order
+    </button>
+    <span id="spinner" class="htmx-indicator">Fetching list...</span>
+</div>
+
+<div id="order-status"></div>
+{% endblock %}

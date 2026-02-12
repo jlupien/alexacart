@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block title %}AlexaCart - Order History{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Order History</h1>
+    <p>Past orders and what was added to your Instacart cart</p>
+</div>
+
+{% if sessions %}
+{% for session_id, entries in sessions %}
+<div class="card">
+    <div class="pref-header">
+        <h3>{{ entries[0].created_at.strftime('%B %d, %Y at %I:%M %p') }}</h3>
+        <span class="muted">Session: {{ session_id[:8] }}</span>
+    </div>
+    <table class="review-table">
+        <thead>
+            <tr>
+                <th>Alexa Item</th>
+                <th>Proposed</th>
+                <th>Final Product</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in entries %}
+            <tr>
+                <td>{{ entry.alexa_text }}</td>
+                <td class="muted">{{ entry.proposed_product or "—" }}</td>
+                <td>{{ entry.final_product or "—" }}</td>
+                <td>
+                    {% if entry.added_to_cart %}
+                    <span class="badge badge-matched">Added</span>
+                    {% else %}
+                    <span class="badge badge-error">Failed</span>
+                    {% endif %}
+                    {% if entry.was_corrected %}
+                    <span class="badge badge-substituted">Corrected</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endfor %}
+{% else %}
+<div class="empty-state">
+    <p>No order history yet. Complete an order to see it here.</p>
+</div>
+{% endif %}
+{% endblock %}

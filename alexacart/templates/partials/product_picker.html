@@ -1,0 +1,29 @@
+<div class="product-picker">
+    <h4>Search Results for "{{ query }}"</h4>
+    {% if results %}
+    <ul class="picker-list">
+        {% for product in results %}
+        <li class="picker-item">
+            {% if product.image_url %}
+            <img src="{{ product.image_url }}" alt="" class="product-thumb">
+            {% endif %}
+            <div class="picker-info">
+                <strong>{{ product.product_name }}</strong>
+                {% if product.brand %}<span class="brand">{{ product.brand }}</span>{% endif %}
+                <span class="price">{{ product.price or "N/A" }}</span>
+            </div>
+            <button
+                type="button"
+                class="btn btn-sm btn-primary"
+                onclick="selectProduct({{ index }}, '{{ product.product_name|e }}', '{{ product.price or '' }}', '{{ product.image_url or '' }}')"
+            >
+                Select
+            </button>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p>No results found.</p>
+    {% endif %}
+    <button type="button" class="btn btn-sm btn-outline" onclick="this.parentElement.innerHTML=''">Cancel</button>
+</div>

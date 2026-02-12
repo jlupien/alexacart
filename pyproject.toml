@@ -1,0 +1,24 @@
+[project]
+name = "alexacart"
+version = "0.1.0"
+description = "Automate grocery ordering from Alexa list to Instacart cart"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "jinja2>=3.1.0",
+    "sqlalchemy>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "httpx>=0.28.0",
+    "pydantic-settings>=2.0.0",
+    "browser-use>=0.1.40",
+    "nodriver>=0.39",
+    "sse-starlette>=2.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]

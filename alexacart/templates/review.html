@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}AlexaCart - Review Order{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Review Order</h1>
+    <p>Session: {{ session_id[:8] }}</p>
+</div>
+
+<form id="review-form" hx-post="/order/commit" hx-target="#commit-result">
+    <input type="hidden" name="session_id" value="{{ session_id }}">
+    <table class="review-table">
+        <thead>
+            <tr>
+                <th>Alexa Item</th>
+                <th>Proposed Product</th>
+                <th>Price</th>
+                <th>Status</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in proposals %}
+            {% include "partials/review_row.html" %}
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="commit-section">
+        <button type="submit" class="btn btn-primary btn-lg">Add All to Cart</button>
+    </div>
+</form>
+
+<div id="commit-result"></div>
+{% endblock %}

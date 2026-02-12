@@ -1,0 +1,64 @@
+<div class="card preference-card" id="pref-{{ item.id }}">
+    <div class="pref-header">
+        <h3>{{ item.name }}</h3>
+        <button
+            class="btn btn-sm btn-danger"
+            hx-delete="/preferences/items/{{ item.id }}"
+            hx-target="#pref-{{ item.id }}"
+            hx-swap="outerHTML"
+            hx-confirm="Delete '{{ item.name }}' and all its aliases/products?"
+        >Delete</button>
+    </div>
+
+    <div class="pref-section">
+        <h4>Aliases</h4>
+        <div class="alias-list">
+            {% for a in item.aliases %}
+            <span class="alias-tag">
+                {{ a.alias }}
+                {% if a.alias != item.name %}
+                <button
+                    class="alias-remove"
+                    hx-delete="/preferences/aliases/{{ a.id }}"
+                    hx-target="#pref-{{ item.id }}"
+                    hx-swap="outerHTML"
+                    hx-get="/preferences/items/{{ item.id }}/fragment"
+                >&times;</button>
+                {% endif %}
+            </span>
+            {% endfor %}
+        </div>
+        <form class="inline-form" hx-post="/preferences/items/{{ item.id }}/aliases" hx-target="#pref-{{ item.id }}" hx-swap="outerHTML" hx-on::after-request="this.reset()">
+            <input type="text" name="alias" placeholder="Add alias..." required>
+            <button type="submit" class="btn btn-sm btn-primary">Add</button>
+        </form>
+    </div>
+
+    <div class="pref-section">
+        <h4>Preferred Products</h4>
+        {% if item.preferred_products %}
+        <ol class="product-rank-list">
+            {% for p in item.preferred_products %}
+            <li>
+                <span class="rank-badge">#{{ p.rank }}</span>
+                <span>{{ p.product_name }}</span>
+                {% if p.brand %}<span class="brand">({{ p.brand }})</span>{% endif %}
+                <div class="rank-controls">
+                    {% if p.rank > 1 %}
+                    <button class="btn btn-xs" hx-post="/preferences/products/{{ p.id }}/move-up" hx-target="#pref-{{ item.id }}" hx-swap="outerHTML">Up</button>
+                    {% endif %}
+                    <button class="btn btn-xs btn-danger" hx-delete="/preferences/products/{{ p.id }}" hx-target="#pref-{{ item.id }}" hx-swap="outerHTML" hx-get="/preferences/items/{{ item.id }}/fragment">Remove</button>
+                </div>
+            </li>
+            {% endfor %}
+        </ol>
+        {% else %}
+        <p class="muted">No preferred products yet.</p>
+        {% endif %}
+        <form class="inline-form" hx-post="/preferences/items/{{ item.id }}/products" hx-target="#pref-{{ item.id }}" hx-swap="outerHTML" hx-on::after-request="this.reset()">
+            <input type="text" name="product_name" placeholder="Product name..." required>
+            <input type="text" name="brand" placeholder="Brand (optional)">
+            <button type="submit" class="btn btn-sm btn-primary">Add Product</button>
+        </form>
+    </div>
+</div>

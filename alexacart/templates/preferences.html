@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}AlexaCart - Preferences{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Grocery Preferences</h1>
+    <p>Manage your grocery items, aliases, and preferred products</p>
+</div>
+
+<div class="preferences-actions">
+    <button
+        class="btn btn-primary"
+        onclick="document.getElementById('add-item-form').classList.toggle('hidden')"
+    >
+        Add Grocery Item
+    </button>
+</div>
+
+<form id="add-item-form" class="hidden card" hx-post="/preferences/items" hx-target="#items-list" hx-swap="innerHTML" hx-on::after-request="this.reset()">
+    <h3>New Grocery Item</h3>
+    <div class="form-group">
+        <label for="name">Item Name</label>
+        <input type="text" name="name" id="name" required placeholder="e.g. skim milk">
+    </div>
+    <button type="submit" class="btn btn-primary">Create</button>
+</form>
+
+<div id="items-list">
+    {% if items %}
+    {% for item in items %}
+    {% include "partials/preference_item.html" %}
+    {% endfor %}
+    {% else %}
+    <div class="empty-state">
+        <p>No grocery items yet. Add one above or start an order to auto-learn preferences.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

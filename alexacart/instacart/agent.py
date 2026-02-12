@@ -144,16 +144,12 @@ class InstacartAgent:
         session = await self._get_session()
 
         task = (
-            f"Go to {INSTACART_BASE}/store/{store_name.lower()}/search/{quote(query)} "
-            f"and extract the product search results. "
-            f"For each product visible on the page, extract: "
-            f"1. The full product name "
-            f"2. The brand name (if shown) "
-            f"3. The price "
-            f"4. The product page URL (the href of the link to the product detail page) "
-            f"5. The image URL (from the img src attribute) "
-            f"6. Whether it appears to be in stock (not showing 'out of stock' or similar) "
-            f"Return the top 5 results. If there are no results, return an empty list. "
+            f"Go to {INSTACART_BASE}/store/{store_name.lower()}/search/{quote(query)} . "
+            f"Wait for results to load, then use the extract tool ONCE to get the top 3 results. "
+            f"For each product extract: product name, brand, price, and product page URL. "
+            f"Do NOT extract image URLs — skip them entirely. "
+            f"Return results immediately after the first successful extraction. "
+            f"If there are no results, return an empty list. "
             f"{DISMISS_MODALS}"
         )
 
@@ -161,13 +157,13 @@ class InstacartAgent:
             task=task,
             llm=ChatBrowserUse(model="bu-2-0"),
             browser_session=session,
-            max_actions_per_step=5,
+            max_actions_per_step=3,
             use_vision=True,
             use_judge=False,
         )
 
         try:
-            history = await agent.run(max_steps=20)
+            history = await agent.run(max_steps=8)
             raw = history.final_result()
             return self._parse_search_results(raw)
         except Exception as e:

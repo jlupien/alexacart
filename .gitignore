@@ -23,3 +23,6 @@ cookie_refresh/node_modules/
 .vscode/
 .claude/
 CLAUDE.md
+
+# Debugging
+logs.txt

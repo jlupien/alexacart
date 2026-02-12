@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @property
+    def base_dir(self) -> Path:
+        return _BASE_DIR
+
+    @property
     def resolved_data_dir(self) -> Path:
         if self.data_dir:
             return Path(self.data_dir)

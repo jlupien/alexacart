@@ -9,12 +9,13 @@ Order flow routes:
 """
 
 import asyncio
+import json
 import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy.orm import Session
@@ -38,6 +39,16 @@ _sessions: dict[str, "OrderSession"] = {}
 
 
 @dataclass
+class ProductOption:
+    product_name: str
+    product_url: str | None = None
+    brand: str | None = None
+    price: str | None = None
+    image_url: str | None = None
+    in_stock: bool = True
+
+
+@dataclass
 class ProposalItem:
     index: int
     alexa_text: str
@@ -54,6 +65,7 @@ class ProposalItem:
     status: str = "Pending"  # Matched, Substituted, New item, Error
     status_class: str = "new"  # matched, substituted, new, error
     in_stock: bool = True
+    alternatives: list[ProductOption] = field(default_factory=list)
 
 
 @dataclass
@@ -73,28 +85,85 @@ async def index(request: Request):
 
 @router.post("/start")
 async def start_order(request: Request):
-    """Fetch Alexa list and begin the search/match process."""
+    """Start the order flow. Launches browser, checks logins, fetches Alexa list, searches."""
     session_id = str(uuid.uuid4())
     session = OrderSession(session_id=session_id)
+    session.status = "logging_in"
     _sessions[session_id] = session
 
+    # Everything runs in the background task — logins, Alexa fetch, Instacart search
+    asyncio.create_task(_run_order(session))
+
+    return HTMLResponse(
+        f'<div id="search-progress" '
+        f'hx-ext="sse" '
+        f'sse-connect="/order/progress/{session_id}" '
+        f'sse-swap="progress" '
+        f'hx-swap="innerHTML">'
+        f'<div class="progress-container">'
+        f'<div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>'
+        f'<p class="progress-text">Starting up...</p>'
+        f"</div></div>"
+    )
+
+
+async def _run_order(session: OrderSession):
+    """Background task: check logins, fetch Alexa list, then search Instacart."""
+    from alexacart.alexa.auth import save_cookies
+    from alexacart.alexa.client import AlexaClient
+    from alexacart.instacart.agent import InstacartAgent
+
+    agent = InstacartAgent()
+
     try:
-        from alexacart.alexa.client import AlexaClient
-
-        client = AlexaClient()
-        items = await client.get_items()
-        await client.close()
-
-        if not items:
-            return HTMLResponse(
-                '<div class="status-message status-warning">'
-                "No items found on your Alexa Grocery List. "
-                "Add some items via Alexa and try again.</div>"
-            )
-
-        session.total_items = len(items)
+        # Step 1: Ensure logged into both Amazon and Instacart
         session.status = "logging_in"
 
+        amazon_ok = await agent.ensure_amazon_logged_in()
+        if not amazon_ok:
+            session.error = "Timed out waiting for Amazon login. Please try again."
+            session.status = "error"
+            return
+
+        instacart_ok = await agent.ensure_logged_in()
+        if not instacart_ok:
+            session.error = "Timed out waiting for Instacart login. Please try again."
+            session.status = "error"
+            return
+
+        # Step 2: Extract fresh Amazon cookies from the browser and save them
+        session.status = "fetching_list"
+        cookie_data = await agent.get_amazon_cookies()
+        if not cookie_data.get("cookies"):
+            session.error = "Could not extract Amazon cookies from browser. Please try again."
+            session.status = "error"
+            return
+        save_cookies(cookie_data)
+
+        # Step 3: Fetch Alexa shopping list using fresh cookies
+        alexa_client = AlexaClient()
+        try:
+            items = await alexa_client.get_items()
+        except Exception as e:
+            await alexa_client.close()
+            error_str = str(e)
+            if "401" in error_str:
+                session.error = "Amazon session expired. Please restart the app and log in again."
+            elif "503" in error_str or "502" in error_str:
+                session.error = "Amazon servers are temporarily unavailable. Please try again in a minute."
+            else:
+                session.error = f"Failed to fetch Alexa list: {error_str}"
+            session.status = "error"
+            return
+        finally:
+            await alexa_client.close()
+
+        if not items:
+            session.error = "No items found on your Alexa Grocery List. Add some items via Alexa and try again."
+            session.status = "error"
+            return
+
+        session.total_items = len(items)
         for i, item in enumerate(items):
             session.proposals.append(
                 ProposalItem(
@@ -106,58 +175,22 @@ async def start_order(request: Request):
                 )
             )
 
-        # Start background search
-        asyncio.create_task(_search_items(session))
+        # Step 4: Search Instacart for each item
+        await _search_items(session, agent)
 
-        return HTMLResponse(
-            f'<div id="search-progress" '
-            f'hx-ext="sse" '
-            f'sse-connect="/order/progress/{session_id}" '
-            f'sse-swap="progress" '
-            f'hx-swap="innerHTML">'
-            f'<div class="progress-container">'
-            f'<div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>'
-            f'<p class="progress-text">Connecting to Instacart...</p>'
-            f"</div></div>"
-        )
-
-    except RuntimeError as e:
-        if "cookies" in str(e).lower():
-            return HTMLResponse(
-                '<div class="status-message status-error">'
-                "<strong>Login Required</strong><br>"
-                "Alexa cookies not found or expired. "
-                "Run <code>python -m alexacart.alexa.auth login</code> to authenticate."
-                "</div>"
-            )
-        return HTMLResponse(
-            f'<div class="status-message status-error">'
-            f"Error: {e}</div>"
-        )
     except Exception as e:
-        logger.exception("Error starting order")
-        return HTMLResponse(
-            f'<div class="status-message status-error">'
-            f"Error fetching Alexa list: {e}</div>"
-        )
+        logger.exception("Order flow failed")
+        session.error = str(e)
+        session.status = "error"
+    finally:
+        await agent.close()
 
 
-async def _search_items(session: OrderSession):
-    """Background task: search Instacart for each item."""
-    from alexacart.instacart.agent import InstacartAgent
-
+async def _search_items(session: OrderSession, agent):
+    """Search Instacart for each item in the session."""
     db = SessionLocal()
-    agent = InstacartAgent()
 
     try:
-        # Ensure the user is logged into Instacart before searching
-        session.status = "logging_in"
-        logged_in = await agent.ensure_logged_in()
-        if not logged_in:
-            session.error = "Timed out waiting for Instacart login. Please try again."
-            session.status = "error"
-            return
-
         session.status = "searching"
 
         for proposal in session.proposals:
@@ -205,6 +238,17 @@ async def _search_items(session: OrderSession):
                             proposal.status = "Substituted (usual out of stock)"
                             proposal.status_class = "substituted"
                             proposal.in_stock = best.in_stock
+                            proposal.alternatives = [
+                                ProductOption(
+                                    product_name=r.product_name,
+                                    product_url=r.product_url,
+                                    brand=r.brand,
+                                    price=r.price,
+                                    image_url=r.image_url,
+                                    in_stock=r.in_stock,
+                                )
+                                for r in results
+                            ]
                         else:
                             proposal.status = "No results"
                             proposal.status_class = "error"
@@ -221,6 +265,17 @@ async def _search_items(session: OrderSession):
                         proposal.status = "New item"
                         proposal.status_class = "new"
                         proposal.in_stock = best.in_stock
+                        proposal.alternatives = [
+                            ProductOption(
+                                product_name=r.product_name,
+                                product_url=r.product_url,
+                                brand=r.brand,
+                                price=r.price,
+                                image_url=r.image_url,
+                                in_stock=r.in_stock,
+                            )
+                            for r in results
+                        ]
                     else:
                         proposal.status = "No results"
                         proposal.status_class = "error"
@@ -239,7 +294,6 @@ async def _search_items(session: OrderSession):
         session.error = str(e)
         session.status = "ready"
     finally:
-        await agent.close()
         db.close()
 
 
@@ -259,12 +313,30 @@ async def progress_stream(session_id: str):
                 "data": (
                     '<div class="progress-container">'
                     '<p class="progress-text">'
-                    "Checking Instacart login... "
-                    "If a browser window opened, please log into Instacart there."
+                    "Checking logins... "
+                    "If a browser window opened, please log into Amazon and Instacart there."
                     "</p></div>"
                 ),
             }
             await asyncio.sleep(3)
+
+        if session.status == "error":
+            yield {
+                "event": "progress",
+                "data": f'<div class="status-message status-error">{session.error}</div>',
+            }
+            return
+
+        while session.status == "fetching_list":
+            yield {
+                "event": "progress",
+                "data": (
+                    '<div class="progress-container">'
+                    '<p class="progress-text">Fetching your Alexa shopping list...</p>'
+                    '</div>'
+                ),
+            }
+            await asyncio.sleep(2)
 
         if session.status == "error":
             yield {
@@ -371,6 +443,41 @@ async def search_products(request: Request, q: str = Query(...), index: int = Qu
         logger.error("Product search failed: %s", e)
         return HTMLResponse(
             f'<div class="status-message status-error">Search failed: {e}</div>'
+        )
+    finally:
+        await agent.close()
+
+
+@router.post("/fetch-url")
+async def fetch_product_url(request: Request, url: str = Form(...), index: int = Form(0)):
+    """Fetch product details from a custom Instacart URL."""
+    from alexacart.instacart.agent import InstacartAgent
+
+    agent = InstacartAgent()
+    try:
+        result = await agent.check_product_by_url(url)
+        if result:
+            return HTMLResponse(
+                f'<div class="status-message status-success" style="margin-top:0.5rem">'
+                f'Found: <strong>{result.product_name}</strong>'
+                f'{" — " + result.brand if result.brand else ""}'
+                f'{" — " + result.price if result.price else ""}'
+                f'</div>'
+                f'<script>'
+                f'selectProduct({index}, {json.dumps(result.product_name)}, '
+                f'{json.dumps(result.price or "")}, {json.dumps(result.image_url or "")}, '
+                f'{json.dumps(url)})'
+                f'</script>'
+            )
+        return HTMLResponse(
+            '<div class="status-message status-error" style="margin-top:0.5rem">'
+            'Could not find a product at that URL.</div>'
+        )
+    except Exception as e:
+        logger.error("URL fetch failed: %s", e)
+        return HTMLResponse(
+            f'<div class="status-message status-error" style="margin-top:0.5rem">'
+            f'Error: {e}</div>'
         )
     finally:
         await agent.close()

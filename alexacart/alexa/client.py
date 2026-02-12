@@ -7,6 +7,7 @@ Uses undocumented Amazon Alexa v2 API endpoints:
 - PUT  /alexashoppinglists/api/v2/lists/{listId}/items/{itemId}?version=N — update item
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -64,22 +65,40 @@ class AlexaClient:
         return self._client
 
     async def _request_with_retry(self, method: str, url: str, **kwargs) -> httpx.Response:
-        """Make a request, retrying once with refreshed cookies on 401."""
+        """Make a request with retries for transient errors (503/502/429) and 401 cookie refresh."""
         client = await self._get_client()
-        resp = await client.request(method, url, **kwargs)
 
-        if resp.status_code == 401:
-            logger.info("Got 401, attempting cookie refresh...")
-            refreshed = try_refresh_via_sidecar()
-            if refreshed:
-                self._cookies = refreshed
-                csrf = _extract_csrf(refreshed)
-                headers = {**COMMON_HEADERS, **get_cookie_header(refreshed)}
-                if csrf:
-                    headers["csrf"] = csrf
-                self._client = httpx.AsyncClient(headers=headers, timeout=30.0)
-                client = self._client
-                resp = await client.request(method, url, **kwargs)
+        # Retry on transient server errors
+        retryable_statuses = {502, 503, 429}
+        max_retries = 3
+
+        for attempt in range(max_retries + 1):
+            resp = await client.request(method, url, **kwargs)
+
+            if resp.status_code == 401:
+                logger.info("Got 401, attempting cookie refresh...")
+                refreshed = try_refresh_via_sidecar()
+                if refreshed:
+                    self._cookies = refreshed
+                    csrf = _extract_csrf(refreshed)
+                    headers = {**COMMON_HEADERS, **get_cookie_header(refreshed)}
+                    if csrf:
+                        headers["csrf"] = csrf
+                    self._client = httpx.AsyncClient(headers=headers, timeout=30.0)
+                    client = self._client
+                    resp = await client.request(method, url, **kwargs)
+                return resp
+
+            if resp.status_code in retryable_statuses and attempt < max_retries:
+                delay = 2 ** attempt  # 1s, 2s, 4s
+                logger.warning(
+                    "Got %d from %s, retrying in %ds (attempt %d/%d)",
+                    resp.status_code, url, delay, attempt + 1, max_retries,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            return resp
 
         return resp
 

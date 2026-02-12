@@ -18,7 +18,6 @@ Automate your grocery ordering: read your Alexa shopping list, match items to In
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
 - A [browser-use](https://browser-use.com) API key (for `bu-2-0` model)
-- Node.js (optional, for automatic cookie refresh)
 
 ### Install
 
@@ -53,30 +52,6 @@ INSTACART_STORE=Wegmans
 | `ALEXA_LIST_NAME` | Name of your Alexa shopping list | `Grocery List` |
 | `INSTACART_STORE` | Instacart store to search | `Wegmans` |
 
-### Alexa Login (first time)
-
-```bash
-uv run python -m alexacart.alexa.auth login
-```
-
-This opens a **separate Chrome window** (not your normal browser) for you to log into Amazon. Even if you're already signed into Amazon in your regular browser, you'll need to sign in again here — nodriver launches its own Chrome instance with a clean profile.
-
-Once you sign in, cookies are automatically captured and saved to `<DATA_DIR>/cookies.json`.
-
-> **macOS users:** You may see a notification saying your terminal app was "prevented from modifying apps on your Mac." This is safe to ignore — nodriver only launches Chrome as a subprocess, it does not modify any apps. If Chrome fails to open, grant your terminal app permission in **System Settings > Privacy & Security > App Management**.
-
-### Cookie Refresh Sidecar (optional)
-
-If you have Node.js installed:
-
-```bash
-cd cookie_refresh
-npm install
-cd ..
-```
-
-This enables automatic cookie refresh when your Amazon session expires.
-
 ### Run
 
 ```bash
@@ -90,9 +65,9 @@ Open http://127.0.0.1:8000 in your browser.
 ### Start an Order
 
 1. Click "Start Order" on the home page
-2. The app fetches your Alexa list and searches Instacart for each item
-3. Review the proposed matches
-4. Click "Change" to pick a different product for any item
+2. A Chrome window opens — log into Amazon and Instacart if prompted (first time only; sessions persist across runs)
+3. The app fetches your Alexa list and searches Instacart for each item
+4. Review the proposed matches — pick alternatives or paste a custom Instacart URL
 5. Click "Add All to Cart" to commit
 
 ### Manage Preferences
@@ -136,6 +111,5 @@ alexacart/
 │   │   └── preferences.py    # Preference CRUD
 │   ├── templates/            # Jinja2 templates
 │   └── static/               # CSS + JS
-├── cookie_refresh/           # Node.js sidecar (optional)
 └── data/                     # Runtime data (gitignored)
 ```

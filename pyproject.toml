@@ -13,7 +13,6 @@ dependencies = [
     "httpx>=0.28.0",
     "pydantic-settings>=2.0.0",
     "browser-use>=0.1.40",
-    "nodriver>=0.39",
     "sse-starlette>=2.0.0",
 ]
 

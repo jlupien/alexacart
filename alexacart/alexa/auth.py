@@ -1,26 +1,21 @@
 """
 Alexa cookie-based authentication.
 
-Initial setup: `python -m alexacart.alexa.auth login`
-Opens a browser for manual Amazon login, then extracts and saves cookies.
+Cookies are extracted automatically from the browser-use persistent Chrome
+session during the order flow (ensure_amazon_logged_in → get_amazon_cookies).
 
 On-demand refresh: called automatically when cookies expire (401 from Alexa API).
-Uses the Node.js alexa-cookie2 sidecar if available, otherwise prompts for manual login.
+Uses the Node.js alexa-cookie2 sidecar if available.
 """
 
-import asyncio
 import json
 import logging
 import subprocess
-import sys
 from pathlib import Path
 
 from alexacart.config import settings
 
 logger = logging.getLogger(__name__)
-
-AMAZON_BASE = "https://www.amazon.com"
-ALEXA_API_BASE = "https://api.amazonalexa.com"
 
 
 def _cookies_path() -> Path:
@@ -54,67 +49,6 @@ def get_cookie_header(data: dict) -> dict[str, str]:
     cookies = data.get("cookies", {})
     cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
     return {"Cookie": cookie_str}
-
-
-async def login_interactive() -> dict:
-    """
-    Open a browser for the user to log into Amazon manually.
-    Extracts cookies after successful login.
-
-    Note: nodriver launches a fresh Chrome instance with its own profile,
-    separate from your normal browser. You will need to sign in even if
-    you're already logged into Amazon in your regular browser.
-    """
-    import nodriver as uc
-
-    print("\n=== AlexaCart Login ===")
-    print()
-    print("This will open a Chrome window to log into Amazon.")
-    print()
-    print("NOTE: This launches a separate Chrome instance (not your normal browser),")
-    print("so you will need to sign in even if you're already logged into Amazon.")
-    print()
-    print("macOS users: You may see a notification saying your terminal was")
-    print('"prevented from modifying apps on your Mac". This is safe to ignore —')
-    print("nodriver only launches Chrome as a subprocess, it does not modify any")
-    print("apps. If Chrome fails to open, grant your terminal app permission in")
-    print("System Settings > Privacy & Security > App Management.")
-    print()
-
-    browser = await uc.start(headless=False)
-
-    # Navigate to Amazon homepage. We intentionally don't go to /alexashoppinglists
-    # or /ap/signin because those pages break or show errors without proper session
-    # cookies or query parameters. The homepage always works and has a "Sign In" link.
-    await browser.get(AMAZON_BASE)
-
-    print("Browser opened to amazon.com.")
-    print("Please sign into your Amazon account in the browser window.")
-    print()
-    input("Press Enter here once you are signed in... ")
-
-    # Give cookies a moment to settle after the user confirms
-    await asyncio.sleep(2)
-
-    # Extract cookies from all tabs
-    all_cookies = await browser.cookies.get_all()
-    cookies = {}
-    for cookie in all_cookies:
-        if "amazon" in cookie.domain:
-            cookies[cookie.name] = cookie.value
-
-    browser.stop()
-    # Let the event loop process pending subprocess cleanup tasks
-    # to avoid "Event loop is closed" noise from asyncio finalizers.
-    await asyncio.sleep(0.5)
-
-    if not cookies:
-        raise RuntimeError("No Amazon cookies captured. Login may have failed.")
-
-    cookie_data = {"cookies": cookies, "source": "interactive_login"}
-    save_cookies(cookie_data)
-    print(f"\nLogin successful! {len(cookies)} cookies saved to {_cookies_path()}")
-    return cookie_data
 
 
 def try_refresh_via_sidecar() -> dict | None:
@@ -174,14 +108,5 @@ async def ensure_valid_cookies() -> dict:
         return data
 
     raise RuntimeError(
-        "No valid Alexa cookies found. Run 'python -m alexacart.alexa.auth login' to authenticate."
+        "No valid Alexa cookies found. Start an order to log in via the browser."
     )
-
-
-# CLI entry point
-if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "login":
-        asyncio.run(login_interactive())
-    else:
-        print("Usage: python -m alexacart.alexa.auth login")
-        print("  Opens a browser for Amazon login and saves cookies.")

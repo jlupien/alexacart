@@ -457,8 +457,12 @@ async def fetch_product_url(request: Request, url: str = Form(...), index: int =
     try:
         result = await agent.check_product_by_url(url)
         if result:
+            img_html = ""
+            if result.image_url:
+                img_html = f'<img src="{result.image_url}" alt="" class="product-thumb" style="vertical-align:middle;margin-right:0.5rem;">'
             return HTMLResponse(
                 f'<div class="status-message status-success" style="margin-top:0.5rem">'
+                f'{img_html}'
                 f'Found: <strong>{result.product_name}</strong>'
                 f'{" — " + result.brand if result.brand else ""}'
                 f'{" — " + result.price if result.price else ""}'

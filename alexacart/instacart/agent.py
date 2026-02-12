@@ -373,8 +373,9 @@ class InstacartAgent:
         task = (
             f"Go to {product_url} . "
             f"This is an Instacart product page. "
-            f"Extract: the full product name, brand, price, image URL, "
-            f"and whether it is in stock (look for 'Add to cart' button vs 'out of stock' or '404' page). "
+            f"Extract: the full product name, brand, and price. "
+            f"Do NOT extract image URLs — skip them entirely. "
+            f"Also check whether it is in stock (look for 'Add to cart' button vs 'out of stock' or '404' page). "
             f"If the page shows a 404 error or the product doesn't exist, say 'NOT FOUND'. "
             f"If the product is out of stock, say 'OUT OF STOCK' along with the product details. "
             f"{DISMISS_MODALS}"
@@ -400,10 +401,51 @@ class InstacartAgent:
                 result = results[0]
                 result.product_url = product_url
                 result.in_stock = "OUT OF STOCK" not in raw_str.upper()
+                # Fast JS-based image extraction from product detail page
+                result.image_url = await self._extract_product_page_image()
                 return result
             return None
         except Exception as e:
             logger.error("Instacart URL check failed for '%s': %s", product_url, e)
+            return None
+
+    async def _extract_product_page_image(self) -> str | None:
+        """
+        Extract the main product image from the current product detail page via JavaScript.
+        Fast — no LLM call needed.
+        """
+        session = await self._get_session()
+        try:
+            cdp_session = await session.get_or_create_cdp_session(target_id=None)
+            resp = await cdp_session.cdp_client.send.Runtime.evaluate(
+                params={
+                    "expression": """
+                        (function() {
+                            // Product detail pages have a main product image
+                            // Try common selectors for the hero/main product image
+                            var img = document.querySelector('img[srcset][loading="eager"]')
+                                   || document.querySelector('[data-testid="product-image"] img')
+                                   || document.querySelector('.e-1alkbr1 img');
+                            if (img) return img.src || img.getAttribute('src') || '';
+                            // Fallback: largest image on the page that looks like a product
+                            var imgs = Array.from(document.querySelectorAll('img[src*="instacart"]'));
+                            if (imgs.length) {
+                                imgs.sort(function(a, b) {
+                                    return (b.naturalWidth * b.naturalHeight) - (a.naturalWidth * a.naturalHeight);
+                                });
+                                return imgs[0].src || '';
+                            }
+                            return '';
+                        })()
+                    """,
+                    "returnByValue": True,
+                },
+                session_id=cdp_session.session_id,
+            )
+            value = resp.get("result", {}).get("value", "")
+            return value if value else None
+        except Exception as e:
+            logger.warning("Product page image extraction failed (non-critical): %s", e)
             return None
 
     async def add_to_cart_by_url(self, product_url: str) -> bool:

@@ -10,6 +10,10 @@ function selectProduct(index, productName, price, imageUrl, productUrl) {
     if (urlInput) urlInput.value = productUrl || '';
     if (imgInput) imgInput.value = imageUrl || '';
 
+    // Deselect any radio buttons (alternatives)
+    row.querySelectorAll('input[type="radio"]').forEach(function(r) { r.checked = false; });
+    row.querySelectorAll('.product-option').forEach(function(opt) { opt.classList.remove('selected'); });
+
     const badge = row.querySelector('.badge');
     if (badge) {
         badge.className = 'badge badge-matched';
@@ -31,6 +35,6 @@ function selectAlternative(index, radio) {
     if (imgInput) imgInput.value = radio.dataset.imageUrl || '';
 
     // Highlight selected option
-    row.querySelectorAll('.product-option').forEach(opt => opt.classList.remove('selected'));
+    row.querySelectorAll('.product-option').forEach(function(opt) { opt.classList.remove('selected'); });
     radio.closest('.product-option').classList.add('selected');
 }

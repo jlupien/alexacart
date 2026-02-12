@@ -83,12 +83,20 @@ async def add_item_alias(
 
 
 @router.delete("/aliases/{alias_id}", response_class=HTMLResponse)
-async def delete_alias(alias_id: int, db: Session = Depends(get_db)):
+async def delete_alias(request: Request, alias_id: int, db: Session = Depends(get_db)):
     """Delete an alias."""
     alias = db.query(Alias).get(alias_id)
     if alias:
+        grocery_item_id = alias.grocery_item_id
         db.delete(alias)
         db.commit()
+        item = db.query(GroceryItem).get(grocery_item_id)
+        if item:
+            return HTMLResponse(
+                templates.get_template("partials/preference_item.html").render(
+                    {"request": request, "item": item}
+                )
+            )
     return HTMLResponse("")
 
 
@@ -97,11 +105,12 @@ async def add_item_product(
     request: Request,
     item_id: int,
     product_name: str = Form(...),
+    product_url: str = Form(""),
     brand: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Add a preferred product to a grocery item."""
-    add_preferred_product(db, item_id, product_name, brand=brand or None)
+    add_preferred_product(db, item_id, product_name, product_url=product_url or None, brand=brand or None)
     item = db.query(GroceryItem).get(item_id)
     return HTMLResponse(
         templates.get_template("partials/preference_item.html").render(
@@ -128,7 +137,7 @@ async def move_product_up(
 
 
 @router.delete("/products/{product_id}", response_class=HTMLResponse)
-async def delete_product(product_id: int, db: Session = Depends(get_db)):
+async def delete_product(request: Request, product_id: int, db: Session = Depends(get_db)):
     """Delete a preferred product."""
     product = db.query(PreferredProduct).get(product_id)
     if product:
@@ -145,6 +154,13 @@ async def delete_product(product_id: int, db: Session = Depends(get_db)):
         for i, p in enumerate(remaining, 1):
             p.rank = i
         db.commit()
+        item = db.query(GroceryItem).get(grocery_item_id)
+        if item:
+            return HTMLResponse(
+                templates.get_template("partials/preference_item.html").render(
+                    {"request": request, "item": item}
+                )
+            )
     return HTMLResponse("")
 
 

@@ -43,6 +43,7 @@ class PreferredProduct(Base):
     grocery_item_id: Mapped[int] = mapped_column(Integer, ForeignKey("grocery_items.id"), nullable=False)
     rank: Mapped[int] = mapped_column(Integer, nullable=False)
     product_name: Mapped[str] = mapped_column(String, nullable=False)
+    product_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     brand: Mapped[str | None] = mapped_column(String, nullable=True)
     image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_seen_in_stock: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

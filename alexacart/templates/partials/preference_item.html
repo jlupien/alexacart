@@ -22,7 +22,6 @@
                     hx-delete="/preferences/aliases/{{ a.id }}"
                     hx-target="#pref-{{ item.id }}"
                     hx-swap="outerHTML"
-                    hx-get="/preferences/items/{{ item.id }}/fragment"
                 >&times;</button>
                 {% endif %}
             </span>
@@ -42,12 +41,13 @@
             <li>
                 <span class="rank-badge">#{{ p.rank }}</span>
                 <span>{{ p.product_name }}</span>
+                {% if p.product_url %}<a href="{{ p.product_url }}" target="_blank" class="product-link" title="{{ p.product_url }}">link</a>{% endif %}
                 {% if p.brand %}<span class="brand">({{ p.brand }})</span>{% endif %}
                 <div class="rank-controls">
                     {% if p.rank > 1 %}
                     <button class="btn btn-xs" hx-post="/preferences/products/{{ p.id }}/move-up" hx-target="#pref-{{ item.id }}" hx-swap="outerHTML">Up</button>
                     {% endif %}
-                    <button class="btn btn-xs btn-danger" hx-delete="/preferences/products/{{ p.id }}" hx-target="#pref-{{ item.id }}" hx-swap="outerHTML" hx-get="/preferences/items/{{ item.id }}/fragment">Remove</button>
+                    <button class="btn btn-xs btn-danger" hx-delete="/preferences/products/{{ p.id }}" hx-target="#pref-{{ item.id }}" hx-swap="outerHTML">Remove</button>
                 </div>
             </li>
             {% endfor %}
@@ -57,6 +57,7 @@
         {% endif %}
         <form class="inline-form" hx-post="/preferences/items/{{ item.id }}/products" hx-target="#pref-{{ item.id }}" hx-swap="outerHTML" hx-on::after-request="this.reset()">
             <input type="text" name="product_name" placeholder="Product name..." required>
+            <input type="url" name="product_url" placeholder="Instacart URL..." required>
             <input type="text" name="brand" placeholder="Brand (optional)">
             <button type="submit" class="btn btn-sm btn-primary">Add Product</button>
         </form>

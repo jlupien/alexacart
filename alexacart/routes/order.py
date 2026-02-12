@@ -46,6 +46,7 @@ class ProposalItem:
     grocery_item_id: int | None = None
     grocery_item_name: str | None = None
     product_name: str | None = None
+    product_url: str | None = None
     brand: str | None = None
     price: str | None = None
     image_url: str | None = None
@@ -157,9 +158,15 @@ async def _search_items(session: OrderSession):
                     # Try preferred products in rank order
                     found = False
                     for pref in match.preferred_products:
-                        result = await agent.search_specific_product(pref.product_name)
+                        # Use direct URL if available, fall back to search
+                        if pref.product_url:
+                            result = await agent.check_product_by_url(pref.product_url)
+                        else:
+                            results = await agent.search_product(pref.product_name)
+                            result = results[0] if results else None
                         if result and result.in_stock:
                             proposal.product_name = result.product_name
+                            proposal.product_url = result.product_url or pref.product_url
                             proposal.brand = result.brand or pref.brand
                             proposal.price = result.price
                             proposal.image_url = result.image_url or pref.image_url
@@ -179,6 +186,7 @@ async def _search_items(session: OrderSession):
                         if results:
                             best = results[0]
                             proposal.product_name = best.product_name
+                            proposal.product_url = best.product_url
                             proposal.brand = best.brand
                             proposal.price = best.price
                             proposal.image_url = best.image_url
@@ -194,6 +202,7 @@ async def _search_items(session: OrderSession):
                     if results:
                         best = results[0]
                         proposal.product_name = best.product_name
+                        proposal.product_url = best.product_url
                         proposal.brand = best.brand
                         proposal.price = best.price
                         proposal.image_url = best.image_url
@@ -314,6 +323,7 @@ async def search_products(request: Request, q: str = Query(...), index: int = Qu
         product_dicts = [
             {
                 "product_name": r.product_name,
+                "product_url": r.product_url,
                 "brand": r.brand,
                 "price": r.price,
                 "image_url": r.image_url,
@@ -385,8 +395,9 @@ async def commit_order(request: Request):
                     proposal = p
                     break
 
-            # Add to Instacart cart
-            added = await instacart_agent.add_to_cart(product_name)
+            # Add to Instacart cart — use URL if available
+            product_url = data.get("product_url", "")
+            added = await instacart_agent.add_to_cart(product_name, product_url=product_url or None)
 
             if added and alexa_item_id:
                 # Check off Alexa list
@@ -421,6 +432,7 @@ async def commit_order(request: Request):
                     alexa_text=alexa_text,
                     grocery_item_id=int(grocery_item_id) if grocery_item_id else None,
                     final_product=product_name,
+                    product_url=product_url or None,
                     brand=data.get("brand"),
                     was_corrected=was_corrected,
                 )
@@ -482,6 +494,7 @@ def _learn_from_result(
     alexa_text: str,
     grocery_item_id: int | None,
     final_product: str,
+    product_url: str | None,
     brand: str | None,
     was_corrected: bool,
 ):
@@ -490,7 +503,7 @@ def _learn_from_result(
         # Known item
         if was_corrected:
             # User changed the proposal — make their choice the top preference
-            make_product_top_choice(db, grocery_item_id, final_product, brand=brand)
+            make_product_top_choice(db, grocery_item_id, final_product, product_url=product_url, brand=brand)
         else:
             # User accepted — ensure product is in preferences
             from alexacart.models import PreferredProduct
@@ -503,12 +516,17 @@ def _learn_from_result(
                 )
                 .first()
             )
-            if not existing:
-                add_preferred_product(db, grocery_item_id, final_product, brand=brand)
+            if existing:
+                # Update URL if we now have one
+                if product_url and not existing.product_url:
+                    existing.product_url = product_url
+                    db.commit()
+            else:
+                add_preferred_product(db, grocery_item_id, final_product, product_url=product_url, brand=brand)
     else:
         # Unknown item — create new grocery item + alias + preferred product
         item = create_grocery_item(db, alexa_text)
-        add_preferred_product(db, item.id, final_product, brand=brand, rank=1)
+        add_preferred_product(db, item.id, final_product, product_url=product_url, brand=brand, rank=1)
 
 
 @router.get("/history")

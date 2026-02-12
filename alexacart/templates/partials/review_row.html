@@ -7,6 +7,7 @@
         <span>{{ item.product_name or "No match found" }}</span>
         <input type="hidden" name="items[{{ item.index }}][alexa_text]" value="{{ item.alexa_text }}">
         <input type="hidden" name="items[{{ item.index }}][product_name]" value="{{ item.product_name or '' }}">
+        <input type="hidden" name="items[{{ item.index }}][product_url]" value="{{ item.product_url or '' }}">
         <input type="hidden" name="items[{{ item.index }}][grocery_item_id]" value="{{ item.grocery_item_id or '' }}">
         <input type="hidden" name="items[{{ item.index }}][alexa_item_id]" value="{{ item.alexa_item_id or '' }}">
     </td>

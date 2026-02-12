@@ -567,6 +567,7 @@ async def commit_order(request: Request):
 
             # Learn from corrections
             if added:
+                image_url = data.get("image_url") or (proposal.image_url if proposal else None)
                 _learn_from_result(
                     db,
                     alexa_text=alexa_text,
@@ -574,6 +575,7 @@ async def commit_order(request: Request):
                     final_product=product_name,
                     product_url=product_url or None,
                     brand=data.get("brand"),
+                    image_url=image_url,
                     was_corrected=was_corrected,
                 )
 
@@ -638,6 +640,7 @@ def _learn_from_result(
     final_product: str,
     product_url: str | None,
     brand: str | None,
+    image_url: str | None,
     was_corrected: bool,
 ):
     """Learn from the user's choices to improve future proposals."""
@@ -645,7 +648,7 @@ def _learn_from_result(
         # Known item
         if was_corrected:
             # User changed the proposal — make their choice the top preference
-            make_product_top_choice(db, grocery_item_id, final_product, product_url=product_url, brand=brand)
+            make_product_top_choice(db, grocery_item_id, final_product, product_url=product_url, brand=brand, image_url=image_url)
         else:
             # User accepted — ensure product is in preferences
             from alexacart.models import PreferredProduct
@@ -659,16 +662,36 @@ def _learn_from_result(
                 .first()
             )
             if existing:
-                # Update URL if we now have one
+                # Update URL/image if we now have one
                 if product_url and not existing.product_url:
                     existing.product_url = product_url
-                    db.commit()
+                if image_url and not existing.image_url:
+                    existing.image_url = image_url
+                db.commit()
             else:
-                add_preferred_product(db, grocery_item_id, final_product, product_url=product_url, brand=brand)
+                add_preferred_product(db, grocery_item_id, final_product, product_url=product_url, brand=brand, image_url=image_url)
     else:
         # Unknown item — create new grocery item + alias + preferred product
         item = create_grocery_item(db, alexa_text)
-        add_preferred_product(db, item.id, final_product, product_url=product_url, brand=brand, rank=1)
+        add_preferred_product(db, item.id, final_product, product_url=product_url, brand=brand, image_url=image_url, rank=1)
+
+
+@router.delete("/history/{session_id}")
+async def delete_history_session(session_id: str, db: Session = Depends(get_db)):
+    """Delete all order log entries for a single session."""
+    db.query(OrderLog).filter(OrderLog.session_id == session_id).delete()
+    db.commit()
+    return HTMLResponse("")
+
+
+@router.delete("/history")
+async def delete_all_history(db: Session = Depends(get_db)):
+    """Delete all order history."""
+    db.query(OrderLog).delete()
+    db.commit()
+    return HTMLResponse(
+        '<div class="empty-state"><p>No order history yet. Complete an order to see it here.</p></div>'
+    )
 
 
 @router.get("/history")

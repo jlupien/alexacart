@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
@@ -11,6 +13,8 @@ from alexacart.matching.matcher import (
     promote_product,
 )
 from alexacart.models import Alias, GroceryItem, PreferredProduct
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/preferences", tags=["preferences"])
 
@@ -117,6 +121,52 @@ async def add_item_product(
             {"request": request, "item": item}
         )
     )
+
+
+@router.post("/items/{item_id}/products/from-url", response_class=HTMLResponse)
+async def add_product_from_url(
+    request: Request,
+    item_id: int,
+    url: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Add a preferred product by fetching details from an Instacart URL."""
+    from alexacart.instacart.agent import InstacartAgent
+
+    item = db.query(GroceryItem).get(item_id)
+    if not item:
+        return HTMLResponse('<div class="status-message status-error">Item not found</div>', status_code=404)
+
+    agent = InstacartAgent()
+    try:
+        result = await agent.check_product_by_url(url)
+        if not result:
+            return HTMLResponse(
+                templates.get_template("partials/preference_item.html").render(
+                    {"request": request, "item": item, "url_error": "Could not find a product at that URL."}
+                )
+            )
+        add_preferred_product(
+            db, item_id, result.product_name,
+            product_url=result.product_url or url,
+            brand=result.brand,
+            image_url=result.image_url,
+        )
+        item = db.query(GroceryItem).get(item_id)
+        return HTMLResponse(
+            templates.get_template("partials/preference_item.html").render(
+                {"request": request, "item": item}
+            )
+        )
+    except Exception as e:
+        logger.error("URL fetch failed for preferences: %s", e)
+        return HTMLResponse(
+            templates.get_template("partials/preference_item.html").render(
+                {"request": request, "item": item, "url_error": f"Error fetching URL: {e}"}
+            )
+        )
+    finally:
+        await agent.close()
 
 
 @router.post("/products/{product_id}/move-up", response_class=HTMLResponse)

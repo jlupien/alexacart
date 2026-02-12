@@ -9,11 +9,31 @@
 </div>
 
 {% if sessions %}
+<div style="margin-bottom: 1rem; text-align: right;">
+    <button
+        class="btn btn-danger btn-sm"
+        hx-delete="/order/history"
+        hx-target="#history-list"
+        hx-swap="innerHTML"
+        hx-confirm="Delete ALL order history? This cannot be undone."
+    >Clear All History</button>
+</div>
+
+<div id="history-list">
 {% for session_id, entries in sessions %}
-<div class="card">
+<div class="card" id="history-{{ session_id[:8] }}">
     <div class="pref-header">
         <h3>{{ entries[0].created_at.strftime('%B %d, %Y at %I:%M %p') }}</h3>
-        <span class="muted">Session: {{ session_id[:8] }}</span>
+        <div style="display: flex; align-items: center; gap: 0.75rem;">
+            <span class="muted">Session: {{ session_id[:8] }}</span>
+            <button
+                class="btn btn-danger btn-sm"
+                hx-delete="/order/history/{{ session_id }}"
+                hx-target="#history-{{ session_id[:8] }}"
+                hx-swap="outerHTML"
+                hx-confirm="Delete this order session?"
+            >Delete</button>
+        </div>
     </div>
     <table class="review-table">
         <thead>
@@ -46,6 +66,7 @@
     </table>
 </div>
 {% endfor %}
+</div>
 {% else %}
 <div class="empty-state">
     <p>No order history yet. Complete an order to see it here.</p>

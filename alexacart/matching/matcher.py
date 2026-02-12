@@ -180,7 +180,7 @@ def promote_product(db: Session, product_id: int) -> None:
     db.commit()
 
 
-def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str, product_url: str | None = None, brand: str | None = None) -> PreferredProduct:
+def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str, product_url: str | None = None, brand: str | None = None, image_url: str | None = None) -> PreferredProduct:
     """
     Make a product the #1 choice for a grocery item.
     If it already exists, move it to rank 1. Otherwise, add it at rank 1.
@@ -196,7 +196,11 @@ def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str
     )
 
     if existing:
+        if image_url and not existing.image_url:
+            existing.image_url = image_url
         if existing.rank == 1:
+            db.commit()
+            db.refresh(existing)
             return existing
         # Move to rank 1: shift everything above it up
         others = (
@@ -216,5 +220,5 @@ def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str
         return existing
     else:
         return add_preferred_product(
-            db, grocery_item_id, product_name, product_url=product_url, brand=brand, rank=1
+            db, grocery_item_id, product_name, product_url=product_url, brand=brand, image_url=image_url, rank=1
         )

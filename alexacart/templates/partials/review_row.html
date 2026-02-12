@@ -37,11 +37,16 @@
         <div class="custom-url-section">
             <details>
                 <summary class="btn btn-xs btn-outline">Use custom URL</summary>
-                <form class="inline-form" hx-post="/order/fetch-url" hx-target="#custom-result-{{ item.index }}" hx-swap="innerHTML">
-                    <input type="hidden" name="index" value="{{ item.index }}">
-                    <input type="url" name="url" placeholder="Paste Instacart product URL..." required style="flex:1">
-                    <button type="submit" class="btn btn-sm btn-primary">Fetch</button>
-                </form>
+                <div class="inline-form">
+                    <input type="url" name="url" placeholder="Paste Instacart product URL..." style="flex:1" class="custom-url-val-{{ item.index }}">
+                    <button type="button" class="btn btn-sm btn-primary"
+                            hx-post="/order/fetch-url"
+                            hx-target="#custom-result-{{ item.index }}"
+                            hx-swap="innerHTML"
+                            hx-include=".custom-url-val-{{ item.index }}"
+                            hx-vals='{"index": "{{ item.index }}"}'
+                            >Fetch</button>
+                </div>
                 <div id="custom-result-{{ item.index }}"></div>
             </details>
         </div>
@@ -52,22 +57,27 @@
             <div>
                 <strong>{{ item.product_name }}</strong>
                 {% if item.brand %}<span class="brand">{{ item.brand }}</span>{% endif %}
+                {% if item.price %}<span class="price">{{ item.price }}</span>{% endif %}
                 {% if item.product_url %}<a href="{{ item.product_url }}" target="_blank" class="product-link">view</a>{% endif %}
             </div>
         </div>
         {% else %}
         <span class="muted">No match found</span>
         <div class="custom-url-section">
-            <form class="inline-form" hx-post="/order/fetch-url" hx-target="#custom-result-{{ item.index }}" hx-swap="innerHTML">
-                <input type="hidden" name="index" value="{{ item.index }}">
-                <input type="url" name="url" placeholder="Paste Instacart product URL..." required style="flex:1">
-                <button type="submit" class="btn btn-sm btn-primary">Fetch</button>
-            </form>
+            <div class="inline-form">
+                <input type="url" name="url" placeholder="Paste Instacart product URL..." style="flex:1" class="custom-url-val-{{ item.index }}">
+                <button type="button" class="btn btn-sm btn-primary"
+                        hx-post="/order/fetch-url"
+                        hx-target="#custom-result-{{ item.index }}"
+                        hx-swap="innerHTML"
+                        hx-include=".custom-url-val-{{ item.index }}"
+                        hx-vals='{"index": "{{ item.index }}"}'
+                        >Fetch</button>
+            </div>
             <div id="custom-result-{{ item.index }}"></div>
         </div>
         {% endif %}
     </td>
-    <td class="price">{{ item.price or "N/A" }}</td>
     <td class="status">
         <span class="badge badge-{{ item.status_class }}">{{ item.status }}</span>
     </td>

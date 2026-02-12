@@ -597,10 +597,13 @@ async def commit_order(request: Request):
         await instacart_agent.close()
         db.close()
 
-    # Build results HTML
-    html = '<div class="results-summary"><h3>Order Results</h3>'
+    # Build results HTML — hide the form and show results
+    html = (
+        '<script>document.getElementById("review-form").style.display="none";</script>'
+        '<div class="results-summary card"><h3>Order Complete</h3>'
+    )
     success_count = sum(1 for r in results if r["success"])
-    html += f'<p>{success_count} of {len(results)} items added to cart</p>'
+    html += f'<p class="muted" style="margin-bottom:1rem">{success_count} of {len(results)} items added to cart</p>'
 
     for r in results:
         icon = "&#10003;" if r["success"] else "&#10007;"
@@ -617,10 +620,9 @@ async def commit_order(request: Request):
         html += "</span></div>"
 
     html += (
-        '</div>'
-        '<div style="margin-top: 1rem;">'
+        '<div style="margin-top: 1.5rem;">'
         '<a href="/order/" class="btn btn-primary">Start New Order</a>'
-        "</div>"
+        "</div></div>"
     )
 
     # Clean up session

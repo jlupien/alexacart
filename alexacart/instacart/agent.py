@@ -394,10 +394,13 @@ class InstacartAgent:
         task = (
             f"Go to {product_url} . "
             f"This is an Instacart product page. "
-            f"Click the 'Add to cart' button. "
-            f"Wait for confirmation that it was added to the cart. "
+            f"First, check if this product is already in your cart — look for a quantity "
+            f"counter or '1 in cart' indicator instead of an 'Add to cart' button. "
+            f"If the product is already in the cart, do NOT add it again — just say 'SUCCESS'. "
+            f"If it is not in the cart yet, click the 'Add to cart' button and wait for "
+            f"confirmation that it was added. "
             f"If the product is out of stock or can't be added, say 'FAILED'. "
-            f"If successfully added, say 'SUCCESS'. "
+            f"If successfully added (or already in cart), say 'SUCCESS'. "
             f"{DISMISS_MODALS}"
         )
 
@@ -433,10 +436,12 @@ class InstacartAgent:
             f"Go to {INSTACART_BASE}/store/{store_name.lower()}/search "
             f"and search for: {product_name}. "
             f"Find the product that best matches this name. "
-            f"Click the 'Add' or 'Add to cart' button for that product. "
-            f"Wait for confirmation that it was added to the cart. "
+            f"Check if it already shows a quantity counter or '1 in cart' indicator — "
+            f"if so, the product is already in the cart. Do NOT add it again; just say 'SUCCESS'. "
+            f"If it is not in the cart yet, click the 'Add' or 'Add to cart' button for that product "
+            f"and wait for confirmation that it was added. "
             f"If the product is out of stock or can't be added, say 'FAILED'. "
-            f"If successfully added, say 'SUCCESS'. "
+            f"If successfully added (or already in cart), say 'SUCCESS'. "
             f"{DISMISS_MODALS}"
         )
 

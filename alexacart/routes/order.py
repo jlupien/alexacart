@@ -86,6 +86,8 @@ class OrderSession:
     active_commits: set = field(default_factory=set)
     # Persistent browser pool (shared between search and commit)
     browser_pool: object | None = None
+    # Detailed status text shown during logging_in phase
+    status_detail: str = ""
 
 
 @router.get("/")
@@ -127,11 +129,13 @@ async def _run_order(session: OrderSession):
     session.browser_pool = pool
 
     try:
-        # Step 1: Parallel auth — Amazon + Instacart on 2 visible browsers,
-        # headless workers starting in background
+        # Step 1: Parallel auth — headless check, visible browser only if login needed
         session.status = "logging_in"
+        session.status_detail = "Checking logins..."
 
-        amazon_ok, instacart_ok, cookie_data = await pool.start_with_auth()
+        amazon_ok, instacart_ok, cookie_data = await pool.start_with_auth(
+            on_status=lambda msg: setattr(session, "status_detail", msg),
+        )
 
         if not amazon_ok or not cookie_data:
             session.error = "Timed out waiting for Amazon login. Please try again."
@@ -333,17 +337,16 @@ async def progress_stream(session_id: str):
             return
 
         while session.status == "logging_in":
+            detail = html_escape(session.status_detail or "Starting up...")
             yield {
                 "event": "progress",
                 "data": (
                     '<div class="progress-container">'
-                    '<p class="progress-text">'
-                    "Checking logins... "
-                    "If a browser window opened, please log into Amazon and Instacart there."
-                    "</p></div>"
+                    f'<p class="progress-text">{detail}</p>'
+                    '</div>'
                 ),
             }
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
 
         if session.status == "error":
             yield {

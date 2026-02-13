@@ -38,10 +38,12 @@ class ProductResult:
 
 
 class InstacartAgent:
-    def __init__(self, profile_suffix: str | None = None, headless: bool = False):
+    def __init__(self, profile_suffix: str | None = None, headless: bool = False,
+                 on_status=None):
         self._session = None
         self._profile_suffix = profile_suffix
         self._headless = headless
+        self._on_status = on_status
 
     async def _get_session(self):
         if self._session is None:
@@ -218,8 +220,15 @@ class InstacartAgent:
         showed_browser = False
         if self._headless:
             logger.info("Login needed for %s — opening visible browser", service_name)
+            if self._on_status:
+                self._on_status(f"Login needed — opening {service_name} window...")
             await self._restart_as(headless=False)
             showed_browser = True
+
+        if self._on_status:
+            self._on_status(
+                f"Waiting for {service_name} login — please log in via the browser window"
+            )
 
         session = await self._get_session()
         logger.info("Not logged into %s — navigating to login page...", service_name)
@@ -750,28 +759,35 @@ class BrowserPool:
         # Index of the Amazon auth agent (for cookie refresh)
         self._amazon_agent_idx = 0
 
-    async def start_with_auth(self) -> tuple[bool, bool, dict | None]:
+    async def start_with_auth(self, on_status=None) -> tuple[bool, bool, dict | None]:
         """
         Start the pool with parallel auth:
-        1. Create 2 visible browsers (pool-0=Amazon, pool-1=Instacart)
+        1. Create 2 headless browsers (pool-0=Amazon, pool-1=Instacart)
         2. Start N-2 headless workers in the background
         3. Run Amazon + Instacart auth in parallel
         4. Inject Instacart cookies from pool-1 into all other agents
         5. Populate the work queue
 
         Returns (amazon_ok, instacart_ok, cookie_data).
+        on_status: optional callback(str) for progress messages.
         """
+        def _status(msg):
+            if on_status:
+                on_status(msg)
+
         # Debug: wipe browser profile cookies to force re-login
         if settings.debug_clear_amazon_cookies:
             self._clear_profile_cookies(settings.resolved_data_dir / "browser-profile-pool-0")
         if settings.debug_clear_instacart_cookies:
             self._clear_profile_cookies(settings.resolved_data_dir / "browser-profile")
 
+        _status("Checking logins...")
+
         # Create the two auth agents (headless — a visible window only opens if login is needed)
         # pool-0 (Amazon auth) gets its own profile for Amazon cookies
         # pool-1 (Instacart auth) uses the default profile to preserve existing cookies
-        amazon_agent = InstacartAgent(profile_suffix="pool-0", headless=True)
-        instacart_agent = InstacartAgent(headless=True)
+        amazon_agent = InstacartAgent(profile_suffix="pool-0", headless=True, on_status=on_status)
+        instacart_agent = InstacartAgent(headless=True, on_status=on_status)
         self._agents = [amazon_agent, instacart_agent]
 
         # Start headless workers in background
@@ -808,12 +824,14 @@ class BrowserPool:
 
         # Wait for workers to finish starting
         if worker_task:
+            _status(f"Starting {worker_count} browser workers...")
             try:
                 await worker_task
             except Exception as e:
                 logger.warning("Worker startup had errors: %s", e)
 
         # Extract Instacart cookies from pool-1 and inject into all others
+        _status("Preparing browsers...")
         try:
             ic_cookies = await instacart_agent.extract_all_cookies()
             inject_tasks = []

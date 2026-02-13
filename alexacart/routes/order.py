@@ -146,48 +146,23 @@ async def _run_order(session: OrderSession):
         save_cookies(cookie_data)
 
         # Step 3: Fetch Alexa shopping list using fresh cookies
-        alexa_client = AlexaClient()
+        # Pass browser cookie refresh so 401s auto-recover
+        alexa_client = AlexaClient(cookie_refresh_fn=agent.get_amazon_cookies)
         try:
             items = await alexa_client.get_items()
         except Exception as e:
-            await alexa_client.close()
             error_str = str(e)
             if "401" in error_str:
-                # First attempt failed — cookies may be stale. Re-extract and retry once.
-                logger.info("Alexa API returned 401, re-extracting cookies and retrying...")
-                cookie_data = await agent.get_amazon_cookies()
-                if cookie_data.get("cookies"):
-                    save_cookies(cookie_data)
-                    alexa_client = AlexaClient()
-                    try:
-                        items = await alexa_client.get_items()
-                    except Exception as retry_e:
-                        await alexa_client.close()
-                        retry_str = str(retry_e)
-                        if "401" in retry_str:
-                            session.error = (
-                                "Alexa session cookies expired. "
-                                "Try visiting alexa.amazon.com in Chrome, then restart the order."
-                            )
-                        else:
-                            session.error = f"Failed to fetch Alexa list: {retry_str}"
-                        session.status = "error"
-                        return
-                else:
-                    session.error = (
-                        "Alexa session cookies expired and could not be refreshed. "
-                        "Try visiting alexa.amazon.com in Chrome, then restart the order."
-                    )
-                    session.status = "error"
-                    return
+                session.error = (
+                    "Alexa session cookies expired. "
+                    "Try visiting alexa.amazon.com in Chrome, then restart the order."
+                )
             elif "503" in error_str or "502" in error_str:
                 session.error = "Amazon servers are temporarily unavailable. Please try again in a minute."
-                session.status = "error"
-                return
             else:
                 session.error = f"Failed to fetch Alexa list: {error_str}"
-                session.status = "error"
-                return
+            session.status = "error"
+            return
         finally:
             await alexa_client.close()
 
@@ -557,8 +532,8 @@ async def _run_commit(session: OrderSession):
     from alexacart.alexa.client import AlexaClient, AlexaListItem
     from alexacart.instacart.agent import InstacartAgent
 
-    alexa_client = AlexaClient()
     instacart_agent = InstacartAgent()
+    alexa_client = AlexaClient(cookie_refresh_fn=instacart_agent.get_amazon_cookies)
     db = SessionLocal()
     q = session.commit_queue
     commit_results = []

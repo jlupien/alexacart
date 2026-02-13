@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from alexacart.alexa.auth import ensure_valid_cookies, get_cookie_header, try_refresh_via_sidecar
+from alexacart.alexa.auth import ensure_valid_cookies, get_cookie_header, save_cookies, try_refresh_via_sidecar
 from alexacart.config import settings
 
 logger = logging.getLogger(__name__)
@@ -49,9 +49,15 @@ class AlexaListItem:
 
 
 class AlexaClient:
-    def __init__(self):
+    def __init__(self, cookie_refresh_fn=None):
+        """
+        Args:
+            cookie_refresh_fn: Optional async callable that returns fresh cookie data.
+                Used to re-extract cookies from the browser session on 401.
+        """
         self._cookies: dict | None = None
         self._client: httpx.AsyncClient | None = None
+        self._cookie_refresh_fn = cookie_refresh_fn
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._cookies is None:
@@ -77,7 +83,22 @@ class AlexaClient:
 
             if resp.status_code == 401:
                 logger.info("Got 401, attempting cookie refresh...")
-                refreshed = await asyncio.to_thread(try_refresh_via_sidecar)
+                refreshed = None
+
+                # Try browser-based refresh first (if available)
+                if self._cookie_refresh_fn:
+                    try:
+                        refreshed = await self._cookie_refresh_fn()
+                        if refreshed:
+                            logger.info("Cookies refreshed via browser session")
+                            save_cookies(refreshed)
+                    except Exception as e:
+                        logger.warning("Browser cookie refresh failed: %s", e)
+
+                # Fall back to Node.js sidecar
+                if not refreshed:
+                    refreshed = await asyncio.to_thread(try_refresh_via_sidecar)
+
                 if refreshed:
                     self._cookies = refreshed
                     csrf = _extract_csrf(refreshed)

@@ -5,6 +5,7 @@
         <input type="hidden" name="items[{{ item.index }}][product_name]" value="{{ item.product_name or '' }}" class="hidden-product-name">
         <input type="hidden" name="items[{{ item.index }}][product_url]" value="{{ item.product_url or '' }}" class="hidden-product-url">
         <input type="hidden" name="items[{{ item.index }}][image_url]" value="{{ item.image_url or '' }}" class="hidden-image-url">
+        <input type="hidden" name="items[{{ item.index }}][brand]" value="{{ item.brand or '' }}" class="hidden-brand">
         <input type="hidden" name="items[{{ item.index }}][grocery_item_id]" value="{{ item.grocery_item_id or '' }}">
         <input type="hidden" name="items[{{ item.index }}][alexa_item_id]" value="{{ item.alexa_item_id or '' }}">
         <input type="hidden" name="items[{{ item.index }}][skip]" value="" class="hidden-skip">
@@ -41,7 +42,7 @@
                     type="radio"
                     name="items[{{ item.index }}][selected]"
                     value="skip"
-                    onchange="toggleSkip({{ item.index }}, true)"
+                    onchange="toggleSkip({{ item.index }})"
                 >
                 <span class="option-details"><strong>Skip this item</strong><span class="brand">Handle manually / buy separately</span></span>
             </label>
@@ -75,7 +76,7 @@
                     type="radio"
                     name="items[{{ item.index }}][selected]"
                     value="skip"
-                    onchange="toggleSkip({{ item.index }}, true)"
+                    onchange="toggleSkip({{ item.index }})"
                 >
                 <span class="option-details"><strong>Skip this item</strong><span class="brand">Handle manually / buy separately</span></span>
             </label>
@@ -89,7 +90,7 @@
                     type="radio"
                     name="items[{{ item.index }}][selected]"
                     value="skip"
-                    onchange="toggleSkip({{ item.index }}, true)"
+                    onchange="toggleSkip({{ item.index }})"
                 >
                 <span class="option-details"><strong>Skip this item</strong><span class="brand">Handle manually / buy separately</span></span>
             </label>

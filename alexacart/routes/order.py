@@ -11,9 +11,11 @@ Order flow routes:
 import asyncio
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
+from html import escape as html_escape
 
 from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse
@@ -99,6 +101,7 @@ async def start_order(request: Request):
         f'hx-ext="sse" '
         f'sse-connect="/order/progress/{session_id}" '
         f'sse-swap="progress" '
+        f'sse-close="close" '
         f'hx-swap="innerHTML">'
         f'<div class="progress-container">'
         f'<div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>'
@@ -214,6 +217,37 @@ async def _run_order(session: OrderSession):
         await agent.close()
 
 
+async def _apply_search_results(
+    proposal: ProposalItem, agent, query: str, status: str, status_class: str
+):
+    """Search Instacart and apply the best result to a proposal."""
+    results = await agent.search_product(query)
+    if results:
+        best = results[0]
+        proposal.product_name = best.product_name
+        proposal.product_url = best.product_url
+        proposal.brand = best.brand
+        proposal.price = best.price
+        proposal.image_url = best.image_url
+        proposal.status = status
+        proposal.status_class = status_class
+        proposal.in_stock = best.in_stock
+        proposal.alternatives = [
+            ProductOption(
+                product_name=r.product_name,
+                product_url=r.product_url,
+                brand=r.brand,
+                price=r.price,
+                image_url=r.image_url,
+                in_stock=r.in_stock,
+            )
+            for r in results
+        ]
+    else:
+        proposal.status = "No results"
+        proposal.status_class = "error"
+
+
 async def _search_items(session: OrderSession, agent):
     """Search Instacart for each item in the session."""
     db = SessionLocal()
@@ -249,64 +283,19 @@ async def _search_items(session: OrderSession, agent):
                             found = True
 
                             # Update last_seen_in_stock
-                            pref.last_seen_in_stock = datetime.utcnow()
+                            pref.last_seen_in_stock = datetime.now(UTC)
                             db.commit()
                             break
 
                     if not found:
-                        # All preferred products out of stock, do general search
-                        results = await agent.search_product(proposal.alexa_text)
-                        if results:
-                            best = results[0]
-                            proposal.product_name = best.product_name
-                            proposal.product_url = best.product_url
-                            proposal.brand = best.brand
-                            proposal.price = best.price
-                            proposal.image_url = best.image_url
-                            proposal.status = "Substituted (usual out of stock)"
-                            proposal.status_class = "substituted"
-                            proposal.in_stock = best.in_stock
-                            proposal.alternatives = [
-                                ProductOption(
-                                    product_name=r.product_name,
-                                    product_url=r.product_url,
-                                    brand=r.brand,
-                                    price=r.price,
-                                    image_url=r.image_url,
-                                    in_stock=r.in_stock,
-                                )
-                                for r in results
-                            ]
-                        else:
-                            proposal.status = "No results"
-                            proposal.status_class = "error"
+                        await _apply_search_results(
+                            proposal, agent, proposal.alexa_text,
+                            "Substituted (usual out of stock)", "substituted",
+                        )
                 else:
-                    # Unknown item — general search
-                    results = await agent.search_product(proposal.alexa_text)
-                    if results:
-                        best = results[0]
-                        proposal.product_name = best.product_name
-                        proposal.product_url = best.product_url
-                        proposal.brand = best.brand
-                        proposal.price = best.price
-                        proposal.image_url = best.image_url
-                        proposal.status = "New item"
-                        proposal.status_class = "new"
-                        proposal.in_stock = best.in_stock
-                        proposal.alternatives = [
-                            ProductOption(
-                                product_name=r.product_name,
-                                product_url=r.product_url,
-                                brand=r.brand,
-                                price=r.price,
-                                image_url=r.image_url,
-                                in_stock=r.in_stock,
-                            )
-                            for r in results
-                        ]
-                    else:
-                        proposal.status = "No results"
-                        proposal.status_class = "error"
+                    await _apply_search_results(
+                        proposal, agent, proposal.alexa_text, "New item", "new",
+                    )
 
             except Exception as e:
                 logger.error("Search failed for '%s': %s", proposal.alexa_text, e)
@@ -333,8 +322,7 @@ async def progress_stream(session_id: str):
         session = _sessions.get(session_id)
         if not session:
             yield {"event": "progress", "data": '<div class="status-message status-error">Session not found</div>'}
-            # Keep connection alive so htmx SSE doesn't reconnect in a loop
-            await asyncio.sleep(3600)
+            yield {"event": "close", "data": ""}
             return
 
         while session.status == "logging_in":
@@ -353,9 +341,9 @@ async def progress_stream(session_id: str):
         if session.status == "error":
             yield {
                 "event": "progress",
-                "data": f'<div class="status-message status-error">{session.error}</div>',
+                "data": f'<div class="status-message status-error">{html_escape(session.error or "")}</div>',
             }
-            await asyncio.sleep(3600)
+            yield {"event": "close", "data": ""}
             return
 
         while session.status == "fetching_list":
@@ -372,9 +360,9 @@ async def progress_stream(session_id: str):
         if session.status == "error":
             yield {
                 "event": "progress",
-                "data": f'<div class="status-message status-error">{session.error}</div>',
+                "data": f'<div class="status-message status-error">{html_escape(session.error or "")}</div>',
             }
-            await asyncio.sleep(3600)
+            yield {"event": "close", "data": ""}
             return
 
         while session.status == "searching":
@@ -397,7 +385,7 @@ async def progress_stream(session_id: str):
                 f"</p>"
             )
             if current_item:
-                html += f'<p class="progress-text">Searching: {current_item}...</p>'
+                html += f'<p class="progress-text">Searching: {html_escape(current_item)}...</p>'
             html += "</div>"
 
             yield {"event": "progress", "data": html}
@@ -408,7 +396,7 @@ async def progress_stream(session_id: str):
             yield {
                 "event": "progress",
                 "data": (
-                    f'<div class="status-message status-error">Search error: {session.error}</div>'
+                    f'<div class="status-message status-error">Search error: {html_escape(session.error or "")}</div>'
                     f'<a href="/order/review/{session_id}" class="btn btn-primary">Review Partial Results</a>'
                 ),
             }
@@ -422,8 +410,7 @@ async def progress_stream(session_id: str):
                 ),
             }
 
-        # Keep connection alive so htmx SSE doesn't reconnect in a loop
-        await asyncio.sleep(3600)
+        yield {"event": "close", "data": ""}
 
     return EventSourceResponse(generate())
 
@@ -477,7 +464,7 @@ async def search_products(request: Request, q: str = Query(...), index: int = Qu
     except Exception as e:
         logger.error("Product search failed: %s", e)
         return HTMLResponse(
-            f'<div class="status-message status-error">Search failed: {e}</div>'
+            f'<div class="status-message status-error">Search failed: {html_escape(str(e))}</div>'
         )
     finally:
         await agent.close()
@@ -507,7 +494,7 @@ async def fetch_product_url(request: Request, url: str = Form(...), index: int =
         logger.error("URL fetch failed: %s", e)
         return HTMLResponse(
             f'<div class="status-message status-error" style="margin-top:0.5rem">'
-            f'Error: {e}</div>'
+            f'Error: {html_escape(str(e))}</div>'
         )
     finally:
         await agent.close()
@@ -528,14 +515,12 @@ async def commit_order(request: Request):
     # Parse form data — items are sent as items[0][product_name], items[0][alexa_text], etc.
     items_data = {}
     for key, value in form.items():
-        if key.startswith("items["):
-            # Parse items[0][field_name]
-            parts = key.replace("items[", "").replace("]", " ").split()
-            if len(parts) == 2:
-                idx, field = int(parts[0]), parts[1][1:]  # Remove leading [
-                if idx not in items_data:
-                    items_data[idx] = {}
-                items_data[idx][field] = value
+        m = re.match(r"items\[(\d+)\]\[(\w+)\]", key)
+        if m:
+            idx, field_name = int(m.group(1)), m.group(2)
+            if idx not in items_data:
+                items_data[idx] = {}
+            items_data[idx][field_name] = value
 
     from alexacart.alexa.client import AlexaClient, AlexaListItem
     from alexacart.instacart.agent import InstacartAgent
@@ -571,6 +556,7 @@ async def commit_order(request: Request):
             # Add to Instacart cart — use URL if available
             product_url = data.get("product_url", "")
             added = await instacart_agent.add_to_cart(product_name, product_url=product_url or None)
+            checked_off = True
 
             if added and alexa_item_id:
                 # Check off Alexa list
@@ -580,7 +566,9 @@ async def commit_order(request: Request):
                     list_id=proposal.alexa_list_id if proposal else "",
                     version=proposal.alexa_item_version if proposal else 1,
                 )
-                await alexa_client.mark_complete(alexa_item)
+                checked_off = await alexa_client.mark_complete(alexa_item)
+                if not checked_off:
+                    logger.warning("Could not check off '%s' on Alexa list", alexa_text)
 
             # Determine if this was a correction
             was_corrected = False
@@ -613,11 +601,17 @@ async def commit_order(request: Request):
                     was_corrected=was_corrected,
                 )
 
+            reason = ""
+            if not added:
+                reason = "Failed to add to cart"
+            elif not checked_off:
+                reason = "Added but could not check off Alexa list"
+
             results.append({
                 "text": alexa_text,
                 "product": product_name,
                 "success": added,
-                "reason": "" if added else "Failed to add to cart",
+                "reason": reason,
             })
 
         db.commit()
@@ -626,50 +620,21 @@ async def commit_order(request: Request):
         logger.exception("Error during commit")
         db.rollback()
         return HTMLResponse(
-            f'<div class="status-message status-error">Error: {e}</div>'
+            f'<div class="status-message status-error">Error: {html_escape(str(e))}</div>'
         )
     finally:
         await alexa_client.close()
         await instacart_agent.close()
         db.close()
 
-    # Build results HTML — hide the form and show results
-    html = (
-        '<script>document.getElementById("review-form").style.display="none";</script>'
-        '<div class="results-summary card"><h3>Order Complete</h3>'
-    )
+    # Build results HTML
     added_count = sum(1 for r in results if r["success"] and not r.get("skipped"))
     skipped_count = sum(1 for r in results if r.get("skipped"))
-    summary = f'{added_count} of {len(results)} items added to cart'
-    if skipped_count:
-        summary += f', {skipped_count} skipped'
-    html += f'<p class="muted" style="margin-bottom:1rem">{summary}</p>'
-
-    for r in results:
-        if r.get("skipped"):
-            icon = "&#8212;"  # em dash
-            cls = "status-warning"
-        elif r["success"]:
-            icon = "&#10003;"
-            cls = "status-success"
-        else:
-            icon = "&#10007;"
-            cls = "status-error"
-        html += (
-            f'<div class="result-item">'
-            f'<span class="result-icon {cls}">{icon}</span>'
-            f'<span>{r["text"]}'
-        )
-        if r.get("product"):
-            html += f' &rarr; {r["product"]}'
-        if r.get("reason"):
-            html += f' ({r["reason"]})'
-        html += "</span></div>"
-
-    html += (
-        '<div style="margin-top: 1.5rem;">'
-        '<a href="/order/" class="btn btn-primary">Start New Order</a>'
-        "</div></div>"
+    html = templates.get_template("partials/commit_results.html").render(
+        results=results,
+        added_count=added_count,
+        skipped_count=skipped_count,
+        total_count=len(results),
     )
 
     # Clean up session
@@ -712,7 +677,7 @@ def _learn_from_result(
                     existing.product_url = product_url
                 if image_url and not existing.image_url:
                     existing.image_url = image_url
-                db.commit()
+                db.flush()
             else:
                 add_preferred_product(db, grocery_item_id, final_product, product_url=product_url, brand=brand, image_url=image_url)
     else:

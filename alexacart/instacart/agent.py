@@ -7,11 +7,10 @@ Uses browser-use to:
 3. Add products to the cart — by direct URL when available, search as fallback
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from urllib.parse import quote
-
-from pydantic import BaseModel
 
 from alexacart.config import settings
 
@@ -36,10 +35,6 @@ class ProductResult:
     price: str | None = None
     image_url: str | None = None
     in_stock: bool = True
-
-
-class SearchResults(BaseModel):
-    products: list[dict]
 
 
 class InstacartAgent:
@@ -85,19 +80,52 @@ class InstacartAgent:
         except Exception as e:
             logger.debug("Could not check for stale lock: %s", e)
 
-    async def ensure_logged_in(self) -> bool:
-        """
-        Check if logged into Instacart. If not, navigate to login page
-        and poll until the user signs in manually.
-        Returns True once logged in.
-        """
-        import asyncio
-
+    async def _run_agent(self, task: str, max_actions_per_step: int = 5, max_steps: int = 8):
+        """Create and run a browser-use agent with standard settings."""
         from browser_use import Agent, ChatBrowserUse
 
         session = await self._get_session()
+        agent = Agent(
+            task=task,
+            llm=ChatBrowserUse(model="bu-2-0"),
+            browser_session=session,
+            max_actions_per_step=max_actions_per_step,
+            use_vision=True,
+            use_judge=False,
+        )
+        return await agent.run(max_steps=max_steps)
 
-        # First check: go to Instacart and see if we're logged in
+    async def _ensure_service_logged_in(
+        self, service_name: str, check_task: str, poll_task: str
+    ) -> bool:
+        """Generic login check + poll loop. Returns True once logged in."""
+        history = await self._run_agent(check_task)
+        raw = str(history.final_result() or "")
+
+        if "LOGGED_IN" in raw.upper() and "NEEDS_LOGIN" not in raw.upper():
+            logger.info("Already logged into %s", service_name)
+            return True
+
+        logger.info("Not logged into %s — waiting for manual login...", service_name)
+
+        for _ in range(60):  # Up to ~10 minutes
+            await asyncio.sleep(10)
+            try:
+                poll_history = await self._run_agent(
+                    poll_task, max_actions_per_step=2, max_steps=3
+                )
+                poll_raw = str(poll_history.final_result() or "")
+                if "LOGGED_IN" in poll_raw.upper() and "NEEDS_LOGIN" not in poll_raw.upper():
+                    logger.info("User logged into %s successfully", service_name)
+                    return True
+            except Exception:
+                logger.debug("Poll attempt for %s login failed", service_name)
+
+        logger.error("Timed out waiting for %s login", service_name)
+        return False
+
+    async def ensure_logged_in(self) -> bool:
+        """Check if logged into Instacart. If not, navigate to login and poll."""
         check_task = (
             f"Go to {INSTACART_BASE} . "
             f"Check if the user is logged into Instacart. "
@@ -108,71 +136,17 @@ class InstacartAgent:
             f"If already logged in, say 'LOGGED_IN'. "
             f"{DISMISS_MODALS}"
         )
-
-        agent = Agent(
-            task=check_task,
-            llm=ChatBrowserUse(model="bu-2-0"),
-            browser_session=session,
-            max_actions_per_step=5,
-            use_vision=True,
-            use_judge=False,
+        poll_task = (
+            f"Look at the current page. "
+            f"If this is still a login/sign-up page, say 'NEEDS_LOGIN'. "
+            f"If the user has logged in (you see a store page, account icon, "
+            f"or home page with products), say 'LOGGED_IN'. "
+            f"{DISMISS_MODALS}"
         )
-
-        history = await agent.run(max_steps=8)
-        raw = str(history.final_result() or "")
-
-        if "LOGGED_IN" in raw.upper() and "NEEDS_LOGIN" not in raw.upper():
-            logger.info("Already logged into Instacart")
-            return True
-
-        # Not logged in — browser should now be on the login page.
-        # Poll until the user logs in.
-        logger.info("Not logged into Instacart — waiting for manual login...")
-
-        for attempt in range(60):  # Up to ~10 minutes
-            await asyncio.sleep(10)
-
-            poll_task = (
-                f"Look at the current page. "
-                f"If this is still a login/sign-up page, say 'NEEDS_LOGIN'. "
-                f"If the user has logged in (you see a store page, account icon, "
-                f"or home page with products), say 'LOGGED_IN'. "
-                f"{DISMISS_MODALS}"
-            )
-
-            poll_agent = Agent(
-                task=poll_task,
-                llm=ChatBrowserUse(model="bu-2-0"),
-                browser_session=session,
-                max_actions_per_step=2,
-                use_vision=True,
-                use_judge=False,
-            )
-
-            try:
-                poll_history = await poll_agent.run(max_steps=3)
-                poll_raw = str(poll_history.final_result() or "")
-                if "LOGGED_IN" in poll_raw.upper() and "NEEDS_LOGIN" not in poll_raw.upper():
-                    logger.info("User logged into Instacart successfully")
-                    return True
-            except Exception:
-                pass  # Keep waiting
-
-        logger.error("Timed out waiting for Instacart login")
-        return False
+        return await self._ensure_service_logged_in("Instacart", check_task, poll_task)
 
     async def ensure_amazon_logged_in(self) -> bool:
-        """
-        Check if logged into Amazon in the persistent browser.
-        If not, navigate to Amazon login and poll until the user signs in.
-        Returns True once logged in.
-        """
-        import asyncio
-
-        from browser_use import Agent, ChatBrowserUse
-
-        session = await self._get_session()
-
+        """Check if logged into Amazon. If not, navigate to login and poll."""
         check_task = (
             "Go to https://www.amazon.com . "
             "Check if the user is logged into Amazon. "
@@ -183,55 +157,14 @@ class InstacartAgent:
             "If already logged in, say 'LOGGED_IN'. "
             f"{DISMISS_MODALS}"
         )
-
-        agent = Agent(
-            task=check_task,
-            llm=ChatBrowserUse(model="bu-2-0"),
-            browser_session=session,
-            max_actions_per_step=5,
-            use_vision=True,
-            use_judge=False,
+        poll_task = (
+            "Look at the current page. "
+            "If this is still an Amazon login/sign-in page, say 'NEEDS_LOGIN'. "
+            "If the user has logged in (you see 'Hello, [Name]' or an account page), "
+            "say 'LOGGED_IN'. "
+            f"{DISMISS_MODALS}"
         )
-
-        history = await agent.run(max_steps=8)
-        raw = str(history.final_result() or "")
-
-        if "LOGGED_IN" in raw.upper() and "NEEDS_LOGIN" not in raw.upper():
-            logger.info("Already logged into Amazon")
-            return True
-
-        logger.info("Not logged into Amazon — waiting for manual login...")
-
-        for attempt in range(60):
-            await asyncio.sleep(10)
-
-            poll_task = (
-                "Look at the current page. "
-                "If this is still an Amazon login/sign-in page, say 'NEEDS_LOGIN'. "
-                "If the user has logged in (you see 'Hello, [Name]' or an account page), "
-                "say 'LOGGED_IN'."
-            )
-
-            poll_agent = Agent(
-                task=poll_task,
-                llm=ChatBrowserUse(model="bu-2-0"),
-                browser_session=session,
-                max_actions_per_step=2,
-                use_vision=True,
-                use_judge=False,
-            )
-
-            try:
-                poll_history = await poll_agent.run(max_steps=3)
-                poll_raw = str(poll_history.final_result() or "")
-                if "LOGGED_IN" in poll_raw.upper() and "NEEDS_LOGIN" not in poll_raw.upper():
-                    logger.info("User logged into Amazon successfully")
-                    return True
-            except Exception:
-                pass
-
-        logger.error("Timed out waiting for Amazon login")
-        return False
+        return await self._ensure_service_logged_in("Amazon", check_task, poll_task)
 
     async def get_amazon_cookies(self) -> dict:
         """
@@ -240,8 +173,6 @@ class InstacartAgent:
         (csrf token, etc.) which are separate from www.amazon.com cookies.
         Returns cookie data in the format expected by AlexaClient.
         """
-        import asyncio
-
         session = await self._get_session()
 
         # Ensure browser is initialized (agent.run() should have started it already)
@@ -270,13 +201,8 @@ class InstacartAgent:
         return {"cookies": cookies, "source": "browser_session"}
 
     async def search_product(self, query: str, store: str | None = None) -> list[ProductResult]:
-        """
-        Search Instacart for a product and return top results.
-        """
-        from browser_use import Agent, ChatBrowserUse
-
+        """Search Instacart for a product and return top results."""
         store_name = store or settings.instacart_store
-        session = await self._get_session()
 
         task = (
             f"Go to {INSTACART_BASE}/store/{store_name.lower()}/search/{quote(query)} . "
@@ -288,17 +214,8 @@ class InstacartAgent:
             f"{DISMISS_MODALS}"
         )
 
-        agent = Agent(
-            task=task,
-            llm=ChatBrowserUse(model="bu-2-0"),
-            browser_session=session,
-            max_actions_per_step=3,
-            use_vision=True,
-            use_judge=False,
-        )
-
         try:
-            history = await agent.run(max_steps=8)
+            history = await self._run_agent(task, max_actions_per_step=3)
             raw = history.final_result()
             results = self._parse_search_results(raw)
             # Backfill image URLs via fast JS extraction (no extra LLM call)
@@ -341,8 +258,8 @@ class InstacartAgent:
                 session_id=cdp_session.session_id,
             )
 
-            raw_value = resp.get("result", {}).get("value", "[]")
             import json
+            raw_value = resp.get("result", {}).get("value", "[]")
             image_map = {}
             for item in json.loads(raw_value):
                 # Normalize href to match product URLs
@@ -375,10 +292,6 @@ class InstacartAgent:
         Navigate directly to a product URL and check if it's in stock.
         Returns ProductResult if the page loads and the product exists, None otherwise.
         """
-        from browser_use import Agent, ChatBrowserUse
-
-        session = await self._get_session()
-
         # Ensure absolute URL
         if product_url.startswith("/"):
             product_url = INSTACART_BASE + product_url
@@ -394,17 +307,8 @@ class InstacartAgent:
             f"{DISMISS_MODALS}"
         )
 
-        agent = Agent(
-            task=task,
-            llm=ChatBrowserUse(model="bu-2-0"),
-            browser_session=session,
-            max_actions_per_step=5,
-            use_vision=True,
-            use_judge=False,
-        )
-
         try:
-            history = await agent.run(max_steps=10)
+            history = await self._run_agent(task, max_steps=10)
             raw = history.final_result()
             raw_str = str(raw or "")
             if "NOT FOUND" in raw_str.upper() or "404" in raw_str:
@@ -484,10 +388,6 @@ class InstacartAgent:
         Navigate directly to a product page and add it to the cart.
         Returns True if successful.
         """
-        from browser_use import Agent, ChatBrowserUse
-
-        session = await self._get_session()
-
         if product_url.startswith("/"):
             product_url = INSTACART_BASE + product_url
 
@@ -501,17 +401,8 @@ class InstacartAgent:
             f"{DISMISS_MODALS}"
         )
 
-        agent = Agent(
-            task=task,
-            llm=ChatBrowserUse(model="bu-2-0"),
-            browser_session=session,
-            max_actions_per_step=5,
-            use_vision=True,
-            use_judge=False,
-        )
-
         try:
-            history = await agent.run(max_steps=15)
+            history = await self._run_agent(task, max_steps=15)
             raw = str(history.final_result() or "")
             success = "SUCCESS" in raw.upper() and "FAILED" not in raw.upper()
             if success:
@@ -536,10 +427,7 @@ class InstacartAgent:
             logger.warning("Direct URL add failed for '%s', falling back to search", product_name)
 
         # Fallback: search by name
-        from browser_use import Agent, ChatBrowserUse
-
         store_name = store or settings.instacart_store
-        session = await self._get_session()
 
         task = (
             f"Go to {INSTACART_BASE}/store/{store_name.lower()}/search "
@@ -552,17 +440,8 @@ class InstacartAgent:
             f"{DISMISS_MODALS}"
         )
 
-        agent = Agent(
-            task=task,
-            llm=ChatBrowserUse(model="bu-2-0"),
-            browser_session=session,
-            max_actions_per_step=5,
-            use_vision=True,
-            use_judge=False,
-        )
-
         try:
-            history = await agent.run(max_steps=25)
+            history = await self._run_agent(task, max_steps=25)
             raw = str(history.final_result() or "")
             success = "SUCCESS" in raw.upper() and "FAILED" not in raw.upper()
             if success:
@@ -574,46 +453,31 @@ class InstacartAgent:
             logger.error("Instacart add-to-cart failed for '%s': %s", product_name, e)
             return False
 
+    @staticmethod
+    def _dict_to_product(p: dict) -> ProductResult:
+        """Convert a dict (from structured agent output) to a ProductResult."""
+        return ProductResult(
+            product_name=p.get("product_name", p.get("name", "Unknown")),
+            product_url=p.get("product_url", p.get("url")),
+            brand=p.get("brand"),
+            price=p.get("price"),
+            image_url=p.get("image_url", p.get("image")),
+            in_stock=p.get("in_stock", True),
+        )
+
     def _parse_search_results(self, raw_result) -> list[ProductResult]:
         """Parse the raw agent output into ProductResult objects."""
-        results = []
-
         if raw_result is None:
-            return results
-
-        raw = str(raw_result)
+            return []
 
         if isinstance(raw_result, dict):
             products = raw_result.get("products", [raw_result])
-            for p in products:
-                results.append(
-                    ProductResult(
-                        product_name=p.get("product_name", p.get("name", "Unknown")),
-                        product_url=p.get("product_url", p.get("url")),
-                        brand=p.get("brand"),
-                        price=p.get("price"),
-                        image_url=p.get("image_url", p.get("image")),
-                        in_stock=p.get("in_stock", True),
-                    )
-                )
+            return [self._dict_to_product(p) for p in products]
         elif isinstance(raw_result, list):
-            for p in raw_result:
-                if isinstance(p, dict):
-                    results.append(
-                        ProductResult(
-                            product_name=p.get("product_name", p.get("name", "Unknown")),
-                            product_url=p.get("product_url", p.get("url")),
-                            brand=p.get("brand"),
-                            price=p.get("price"),
-                            image_url=p.get("image_url", p.get("image")),
-                            in_stock=p.get("in_stock", True),
-                        )
-                    )
+            return [self._dict_to_product(p) for p in raw_result if isinstance(p, dict)]
         else:
             # Try to parse structured text (markdown) from agent output
-            results.extend(self._parse_text_results(raw))
-
-        return results
+            return self._parse_text_results(str(raw_result))
 
     def _parse_text_results(self, text: str) -> list[ProductResult]:
         """Parse free-text/markdown agent output into ProductResult objects."""

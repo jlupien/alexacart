@@ -1,0 +1,27 @@
+<script>document.getElementById("review-form").style.display="none";</script>
+<div class="results-summary card">
+    <h3>Order Complete</h3>
+    <p class="muted" style="margin-bottom:1rem">
+        {{ added_count }} of {{ total_count }} items added to cart
+        {%- if skipped_count %}, {{ skipped_count }} skipped{% endif %}
+    </p>
+    {% for r in results %}
+    <div class="result-item">
+        {% if r.skipped %}
+        <span class="result-icon status-warning">&#8212;</span>
+        {% elif r.success %}
+        <span class="result-icon status-success">&#10003;</span>
+        {% else %}
+        <span class="result-icon status-error">&#10007;</span>
+        {% endif %}
+        <span>
+            {{ r.text }}
+            {%- if r.product %} &rarr; {{ r.product }}{% endif %}
+            {%- if r.reason %} ({{ r.reason }}){% endif %}
+        </span>
+    </div>
+    {% endfor %}
+    <div style="margin-top: 1.5rem;">
+        <a href="/order/" class="btn btn-primary">Start New Order</a>
+    </div>
+</div>

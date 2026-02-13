@@ -27,7 +27,7 @@
             </span>
             {% endfor %}
         </div>
-        <form class="inline-form" hx-post="/preferences/items/{{ item.id }}/aliases" hx-target="#pref-{{ item.id }}" hx-swap="outerHTML" hx-on::after-request="this.reset()">
+        <form class="inline-form" hx-post="/preferences/items/{{ item.id }}/aliases" hx-target="#pref-{{ item.id }}" hx-swap="outerHTML" hx-on::after-request="if(event.detail.successful) this.reset()">
             <input type="text" name="alias" placeholder="Add alias..." required>
             <button type="submit" class="btn btn-sm btn-primary">Add</button>
         </form>
@@ -66,7 +66,7 @@
         </form>
         <details style="margin-top: 0.5rem;">
             <summary class="muted" style="cursor: pointer; font-size: 0.8rem;">Or add manually</summary>
-            <form class="inline-form" hx-post="/preferences/items/{{ item.id }}/products" hx-target="#pref-{{ item.id }}" hx-swap="outerHTML" hx-on::after-request="this.reset()" style="margin-top: 0.375rem;">
+            <form class="inline-form" hx-post="/preferences/items/{{ item.id }}/products" hx-target="#pref-{{ item.id }}" hx-swap="outerHTML" hx-on::after-request="if(event.detail.successful) this.reset()" style="margin-top: 0.375rem;">
                 <input type="text" name="product_name" placeholder="Product name..." required>
                 <input type="url" name="product_url" placeholder="Instacart URL...">
                 <input type="text" name="brand" placeholder="Brand (optional)">

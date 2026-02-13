@@ -6,9 +6,11 @@ function selectProduct(index, productName, price, imageUrl, productUrl, brand) {
     var nameInput = row.querySelector('.hidden-product-name');
     var urlInput = row.querySelector('.hidden-product-url');
     var imgInput = row.querySelector('.hidden-image-url');
+    var brandInput = row.querySelector('.hidden-brand');
     if (nameInput) nameInput.value = productName;
     if (urlInput) urlInput.value = productUrl || '';
     if (imgInput) imgInput.value = imageUrl || '';
+    if (brandInput) brandInput.value = brand || '';
 
     // Unmark skip if it was set
     var skipInput = row.querySelector('.hidden-skip');
@@ -37,9 +39,6 @@ function selectProduct(index, productName, price, imageUrl, productUrl, brand) {
         } else {
             cell.appendChild(optionsDiv);
         }
-        // Hide the matched-product display
-        var matched = row.querySelector('.matched-product');
-        if (matched) matched.style.display = 'none';
     }
 
     // Build a new product-option label that matches the existing style
@@ -54,6 +53,7 @@ function selectProduct(index, productName, price, imageUrl, productUrl, brand) {
     radio.setAttribute('data-product-name', productName);
     radio.setAttribute('data-product-url', productUrl || '');
     radio.setAttribute('data-image-url', imageUrl || '');
+    radio.setAttribute('data-brand', brand || '');
     radio.onchange = function() { selectAlternative(index, this); };
     label.appendChild(radio);
 
@@ -111,10 +111,12 @@ function selectAlternative(index, radio) {
     var nameInput = row.querySelector('.hidden-product-name');
     var urlInput = row.querySelector('.hidden-product-url');
     var imgInput = row.querySelector('.hidden-image-url');
+    var brandInput = row.querySelector('.hidden-brand');
 
     if (nameInput) nameInput.value = radio.dataset.productName || '';
     if (urlInput) urlInput.value = radio.dataset.productUrl || '';
     if (imgInput) imgInput.value = radio.dataset.imageUrl || '';
+    if (brandInput) brandInput.value = radio.dataset.brand || '';
 
     // Unmark skip
     var skipInput = row.querySelector('.hidden-skip');

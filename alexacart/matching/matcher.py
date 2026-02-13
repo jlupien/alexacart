@@ -80,8 +80,7 @@ def create_grocery_item(db: Session, name: str) -> GroceryItem:
 
     alias = Alias(grocery_item_id=item.id, alias=normalized)
     db.add(alias)
-    db.commit()
-    db.refresh(item)
+    db.flush()
 
     logger.info("Created grocery item '%s' with id=%d", normalized, item.id)
     return item
@@ -102,8 +101,7 @@ def add_alias(db: Session, grocery_item_id: int, alias_text: str) -> Alias:
 
     alias = Alias(grocery_item_id=grocery_item_id, alias=normalized)
     db.add(alias)
-    db.commit()
-    db.refresh(alias)
+    db.flush()
     return alias
 
 
@@ -152,14 +150,13 @@ def add_preferred_product(
         image_url=image_url,
     )
     db.add(product)
-    db.commit()
-    db.refresh(product)
+    db.flush()
     return product
 
 
 def promote_product(db: Session, product_id: int) -> None:
     """Move a preferred product up one rank (lower number = higher priority)."""
-    product = db.query(PreferredProduct).get(product_id)
+    product = db.get(PreferredProduct, product_id)
     if not product or product.rank <= 1:
         return
 
@@ -177,7 +174,7 @@ def promote_product(db: Session, product_id: int) -> None:
     else:
         product.rank -= 1
 
-    db.commit()
+    db.flush()
 
 
 def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str, product_url: str | None = None, brand: str | None = None, image_url: str | None = None) -> PreferredProduct:
@@ -199,8 +196,7 @@ def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str
         if image_url and not existing.image_url:
             existing.image_url = image_url
         if existing.rank == 1:
-            db.commit()
-            db.refresh(existing)
+            db.flush()
             return existing
         # Move to rank 1: shift everything above it up
         others = (
@@ -215,8 +211,7 @@ def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str
         for p in others:
             p.rank += 1
         existing.rank = 1
-        db.commit()
-        db.refresh(existing)
+        db.flush()
         return existing
     else:
         return add_preferred_product(

@@ -86,7 +86,7 @@ def try_refresh_via_sidecar() -> dict | None:
         logger.warning("Node.js not found, cannot run cookie refresh sidecar")
     except subprocess.TimeoutExpired:
         logger.warning("Cookie refresh sidecar timed out")
-    except (json.JSONDecodeError, Exception) as e:
+    except (json.JSONDecodeError, OSError) as e:
         logger.warning("Cookie refresh sidecar error: %s", e)
 
     return None
@@ -103,7 +103,8 @@ async def ensure_valid_cookies() -> dict:
         return data
 
     # Try refreshing
-    data = try_refresh_via_sidecar()
+    import asyncio
+    data = await asyncio.to_thread(try_refresh_via_sidecar)
     if data:
         return data
 

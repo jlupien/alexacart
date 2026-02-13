@@ -77,15 +77,18 @@ class AlexaClient:
 
             if resp.status_code == 401:
                 logger.info("Got 401, attempting cookie refresh...")
-                refreshed = try_refresh_via_sidecar()
+                refreshed = await asyncio.to_thread(try_refresh_via_sidecar)
                 if refreshed:
                     self._cookies = refreshed
                     csrf = _extract_csrf(refreshed)
                     headers = {**COMMON_HEADERS, **get_cookie_header(refreshed)}
                     if csrf:
                         headers["csrf"] = csrf
+                    old_client = self._client
                     self._client = httpx.AsyncClient(headers=headers, timeout=30.0)
                     client = self._client
+                    if old_client:
+                        await old_client.aclose()
                     resp = await client.request(method, url, **kwargs)
                 return resp
 

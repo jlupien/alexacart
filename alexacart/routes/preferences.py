@@ -2,7 +2,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from alexacart.app import templates
 from alexacart.db import get_db
@@ -19,9 +19,32 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/preferences", tags=["preferences"])
 
 
+def _render_item(request: Request, item: GroceryItem, **extra) -> str:
+    """Render a single preference item card partial."""
+    return templates.get_template("partials/preference_item.html").render(
+        {"request": request, "item": item, **extra}
+    )
+
+
+def _render_all_items(request: Request, db: Session) -> str:
+    """Render all preference item cards (used after create/merge)."""
+    items = (
+        db.query(GroceryItem)
+        .options(selectinload(GroceryItem.aliases), selectinload(GroceryItem.preferred_products))
+        .order_by(GroceryItem.name)
+        .all()
+    )
+    return "\n".join(_render_item(request, item) for item in items)
+
+
 @router.get("/")
 async def preferences_page(request: Request, db: Session = Depends(get_db)):
-    items = db.query(GroceryItem).order_by(GroceryItem.name).all()
+    items = (
+        db.query(GroceryItem)
+        .options(selectinload(GroceryItem.aliases), selectinload(GroceryItem.preferred_products))
+        .order_by(GroceryItem.name)
+        .all()
+    )
     return templates.TemplateResponse(
         "preferences.html", {"request": request, "items": items}
     )
@@ -31,35 +54,23 @@ async def preferences_page(request: Request, db: Session = Depends(get_db)):
 async def create_item(request: Request, name: str = Form(...), db: Session = Depends(get_db)):
     """Create a new grocery item (with its name as initial alias)."""
     create_grocery_item(db, name)
-    items = db.query(GroceryItem).order_by(GroceryItem.name).all()
-    # Return the full items list HTML for htmx swap
-    parts = []
-    for item in items:
-        parts.append(
-            templates.get_template("partials/preference_item.html").render(
-                {"request": request, "item": item}
-            )
-        )
-    return HTMLResponse("\n".join(parts))
+    db.commit()
+    return HTMLResponse(_render_all_items(request, db))
 
 
 @router.get("/items/{item_id}/fragment", response_class=HTMLResponse)
 async def item_fragment(request: Request, item_id: int, db: Session = Depends(get_db)):
     """Return a single preference item card (used by htmx after updates)."""
-    item = db.query(GroceryItem).get(item_id)
+    item = db.get(GroceryItem, item_id)
     if not item:
         return HTMLResponse("")
-    return HTMLResponse(
-        templates.get_template("partials/preference_item.html").render(
-            {"request": request, "item": item}
-        )
-    )
+    return HTMLResponse(_render_item(request, item))
 
 
 @router.delete("/items/{item_id}", response_class=HTMLResponse)
 async def delete_item(item_id: int, db: Session = Depends(get_db)):
     """Delete a grocery item and all its aliases/products."""
-    item = db.query(GroceryItem).get(item_id)
+    item = db.get(GroceryItem, item_id)
     if item:
         db.delete(item)
         db.commit()
@@ -76,31 +87,24 @@ async def add_item_alias(
     """Add an alias to a grocery item."""
     try:
         add_alias(db, item_id, alias)
+        db.commit()
     except ValueError:
         pass  # Alias already exists elsewhere
-    item = db.query(GroceryItem).get(item_id)
-    return HTMLResponse(
-        templates.get_template("partials/preference_item.html").render(
-            {"request": request, "item": item}
-        )
-    )
+    item = db.get(GroceryItem, item_id)
+    return HTMLResponse(_render_item(request, item))
 
 
 @router.delete("/aliases/{alias_id}", response_class=HTMLResponse)
 async def delete_alias(request: Request, alias_id: int, db: Session = Depends(get_db)):
     """Delete an alias."""
-    alias = db.query(Alias).get(alias_id)
+    alias = db.get(Alias, alias_id)
     if alias:
         grocery_item_id = alias.grocery_item_id
         db.delete(alias)
         db.commit()
-        item = db.query(GroceryItem).get(grocery_item_id)
+        item = db.get(GroceryItem, grocery_item_id)
         if item:
-            return HTMLResponse(
-                templates.get_template("partials/preference_item.html").render(
-                    {"request": request, "item": item}
-                )
-            )
+            return HTMLResponse(_render_item(request, item))
     return HTMLResponse("")
 
 
@@ -115,12 +119,9 @@ async def add_item_product(
 ):
     """Add a preferred product to a grocery item."""
     add_preferred_product(db, item_id, product_name, product_url=product_url or None, brand=brand or None)
-    item = db.query(GroceryItem).get(item_id)
-    return HTMLResponse(
-        templates.get_template("partials/preference_item.html").render(
-            {"request": request, "item": item}
-        )
-    )
+    db.commit()
+    item = db.get(GroceryItem, item_id)
+    return HTMLResponse(_render_item(request, item))
 
 
 @router.post("/items/{item_id}/products/from-url", response_class=HTMLResponse)
@@ -133,7 +134,7 @@ async def add_product_from_url(
     """Add a preferred product by fetching details from an Instacart URL."""
     from alexacart.instacart.agent import InstacartAgent
 
-    item = db.query(GroceryItem).get(item_id)
+    item = db.get(GroceryItem, item_id)
     if not item:
         return HTMLResponse('<div class="status-message status-error">Item not found</div>', status_code=404)
 
@@ -142,9 +143,7 @@ async def add_product_from_url(
         result = await agent.check_product_by_url(url)
         if not result:
             return HTMLResponse(
-                templates.get_template("partials/preference_item.html").render(
-                    {"request": request, "item": item, "url_error": "Could not find a product at that URL."}
-                )
+                _render_item(request, item, url_error="Could not find a product at that URL.")
             )
         add_preferred_product(
             db, item_id, result.product_name,
@@ -152,18 +151,13 @@ async def add_product_from_url(
             brand=result.brand,
             image_url=result.image_url,
         )
-        item = db.query(GroceryItem).get(item_id)
-        return HTMLResponse(
-            templates.get_template("partials/preference_item.html").render(
-                {"request": request, "item": item}
-            )
-        )
+        db.commit()
+        item = db.get(GroceryItem, item_id)
+        return HTMLResponse(_render_item(request, item))
     except Exception as e:
         logger.error("URL fetch failed for preferences: %s", e)
         return HTMLResponse(
-            templates.get_template("partials/preference_item.html").render(
-                {"request": request, "item": item, "url_error": f"Error fetching URL: {e}"}
-            )
+            _render_item(request, item, url_error=f"Error fetching URL: {e}")
         )
     finally:
         await agent.close()
@@ -174,22 +168,19 @@ async def move_product_up(
     request: Request, product_id: int, db: Session = Depends(get_db)
 ):
     """Move a preferred product up one rank."""
-    product = db.query(PreferredProduct).get(product_id)
+    product = db.get(PreferredProduct, product_id)
     if product:
         promote_product(db, product_id)
-        item = db.query(GroceryItem).get(product.grocery_item_id)
-        return HTMLResponse(
-            templates.get_template("partials/preference_item.html").render(
-                {"request": request, "item": item}
-            )
-        )
+        db.commit()
+        item = db.get(GroceryItem, product.grocery_item_id)
+        return HTMLResponse(_render_item(request, item))
     return HTMLResponse("")
 
 
 @router.delete("/products/{product_id}", response_class=HTMLResponse)
 async def delete_product(request: Request, product_id: int, db: Session = Depends(get_db)):
     """Delete a preferred product."""
-    product = db.query(PreferredProduct).get(product_id)
+    product = db.get(PreferredProduct, product_id)
     if product:
         grocery_item_id = product.grocery_item_id
         db.delete(product)
@@ -204,13 +195,9 @@ async def delete_product(request: Request, product_id: int, db: Session = Depend
         for i, p in enumerate(remaining, 1):
             p.rank = i
         db.commit()
-        item = db.query(GroceryItem).get(grocery_item_id)
+        item = db.get(GroceryItem, grocery_item_id)
         if item:
-            return HTMLResponse(
-                templates.get_template("partials/preference_item.html").render(
-                    {"request": request, "item": item}
-                )
-            )
+            return HTMLResponse(_render_item(request, item))
     return HTMLResponse("")
 
 
@@ -225,8 +212,8 @@ async def merge_items(
     if source_id == target_id:
         return HTMLResponse("Cannot merge an item with itself", status_code=400)
 
-    source = db.query(GroceryItem).get(source_id)
-    target = db.query(GroceryItem).get(target_id)
+    source = db.get(GroceryItem, source_id)
+    target = db.get(GroceryItem, target_id)
 
     if not source or not target:
         return HTMLResponse("Item not found", status_code=404)
@@ -257,12 +244,4 @@ async def merge_items(
     db.delete(source)
     db.commit()
 
-    items = db.query(GroceryItem).order_by(GroceryItem.name).all()
-    parts = []
-    for item in items:
-        parts.append(
-            templates.get_template("partials/preference_item.html").render(
-                {"request": request, "item": item}
-            )
-        )
-    return HTMLResponse("\n".join(parts))
+    return HTMLResponse(_render_all_items(request, db))

@@ -109,6 +109,8 @@
         </div>
     </td>
     <td class="status">
-        <span class="badge badge-{{ item.status_class }}">{{ item.status }}</span>
+        <div id="status-{{ item.index }}">
+            <span class="badge badge-{{ item.status_class }}" data-original-status="{{ item.status }}" data-original-class="badge-{{ item.status_class }}">{{ item.status }}</span>
+        </div>
     </td>
 </tr>

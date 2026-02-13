@@ -8,8 +8,7 @@
     <p>Session: {{ session_id[:8] }}</p>
 </div>
 
-<form id="review-form" hx-post="/order/commit" hx-target="#commit-result" hx-swap="innerHTML"
-      hx-disabled-elt="#commit-btn" hx-indicator="#commit-spinner">
+<form id="review-form" hx-post="/order/commit" hx-target="#commit-section">
     <input type="hidden" name="session_id" value="{{ session_id }}">
     <table class="review-table">
         <thead>
@@ -27,10 +26,7 @@
     </table>
 
     <div class="commit-section" id="commit-section">
-        <span id="commit-spinner" class="htmx-indicator" style="margin-right: 1rem;">Adding to cart...</span>
         <button type="submit" id="commit-btn" class="btn btn-primary btn-lg">Add All to Cart</button>
     </div>
 </form>
-
-<div id="commit-result"></div>
 {% endblock %}

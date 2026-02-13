@@ -427,7 +427,17 @@ main {
 .commit-section {
     margin-top: 1.5rem;
     display: flex;
-    justify-content: flex-end;
+    justify-content: center;
+}
+
+/* Pulse animation for active commit badge */
+.commit-pulse {
+    animation: commit-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes commit-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
 }
 
 /* Utility */

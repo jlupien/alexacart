@@ -131,8 +131,14 @@ function selectAlternative(index, radio) {
     // Update status badge
     var badge = row.querySelector('.badge');
     if (badge) {
-        badge.className = 'badge badge-matched';
-        badge.textContent = 'Selected';
+        if (radio.value === '0') {
+            // Restoring original proposed product — restore original status
+            badge.className = 'badge ' + (badge.dataset.originalClass || 'badge-matched');
+            badge.textContent = badge.dataset.originalStatus || 'Selected';
+        } else {
+            badge.className = 'badge badge-matched';
+            badge.textContent = 'Selected';
+        }
     }
 }
 

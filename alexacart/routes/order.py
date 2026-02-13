@@ -78,6 +78,9 @@ class OrderSession:
     searched_count: int = 0
     status: str = "starting"  # starting, searching, ready, committing, done
     error: str | None = None
+    # Commit state (queue-based for reliable SSE delivery)
+    commit_queue: asyncio.Queue | None = None
+    commit_items_data: dict = field(default_factory=dict)
 
 
 @router.get("/")
@@ -502,7 +505,7 @@ async def fetch_product_url(request: Request, url: str = Form(...), index: int =
 
 @router.post("/commit")
 async def commit_order(request: Request):
-    """Add accepted items to Instacart cart and check off Alexa list."""
+    """Start the commit flow: parse form, launch background task, return SSE progress."""
     form = await request.form()
     session_id = form.get("session_id", "")
 
@@ -522,29 +525,61 @@ async def commit_order(request: Request):
                 items_data[idx] = {}
             items_data[idx][field_name] = value
 
+    session.commit_items_data = items_data
+    session.commit_queue = asyncio.Queue()
+
+    asyncio.create_task(_run_commit(session))
+
+    return HTMLResponse(
+        f'<div id="commit-progress" '
+        f'hx-ext="sse" '
+        f'sse-connect="/order/commit-progress/{session_id}" '
+        f'sse-swap="progress" '
+        f'sse-close="close" '
+        f'hx-swap="innerHTML">'
+        f'<div class="progress-container">'
+        f'<p class="progress-text">Starting...</p>'
+        f"</div></div>"
+    )
+
+
+async def _run_commit(session: OrderSession):
+    """Background task: add items to Instacart cart and check off Alexa list."""
     from alexacart.alexa.client import AlexaClient, AlexaListItem
     from alexacart.instacart.agent import InstacartAgent
 
     alexa_client = AlexaClient()
     instacart_agent = InstacartAgent()
     db = SessionLocal()
-
-    results = []
+    q = session.commit_queue
+    commit_results = []
+    commit_count = 0
+    total = sum(1 for d in session.commit_items_data.values() if d.get("skip") != "1")
 
     try:
-        for idx, data in sorted(items_data.items()):
+        for idx, data in sorted(session.commit_items_data.items()):
             product_name = data.get("product_name", "")
             alexa_text = data.get("alexa_text", "")
             grocery_item_id = data.get("grocery_item_id", "")
             alexa_item_id = data.get("alexa_item_id", "")
 
             if data.get("skip") == "1":
-                results.append({"text": alexa_text, "success": True, "reason": "Skipped", "skipped": True})
+                commit_results.append(
+                    {"text": alexa_text, "success": True, "reason": "Skipped", "skipped": True}
+                )
+                await q.put(("skip", idx, alexa_text, commit_count, total))
                 continue
 
             if not product_name:
-                results.append({"text": alexa_text, "success": False, "reason": "No product selected"})
+                commit_results.append(
+                    {"text": alexa_text, "success": False, "reason": "No product selected"}
+                )
+                commit_count += 1
+                await q.put(("done", idx, alexa_text, False, "No product selected", commit_count, total))
                 continue
+
+            # Signal "active" — this item is being processed now
+            await q.put(("active", idx, alexa_text, commit_count, total))
 
             # Find the original proposal
             proposal = None
@@ -559,7 +594,6 @@ async def commit_order(request: Request):
             checked_off = True
 
             if added and alexa_item_id:
-                # Check off Alexa list
                 alexa_item = AlexaListItem(
                     item_id=alexa_item_id,
                     text=alexa_text,
@@ -570,14 +604,12 @@ async def commit_order(request: Request):
                 if not checked_off:
                     logger.warning("Could not check off '%s' on Alexa list", alexa_text)
 
-            # Determine if this was a correction
             was_corrected = False
             if proposal and proposal.product_name and proposal.product_name != product_name:
                 was_corrected = True
 
-            # Log to order_log
             log_entry = OrderLog(
-                session_id=session_id,
+                session_id=session.session_id,
                 alexa_text=alexa_text,
                 matched_grocery_item_id=int(grocery_item_id) if grocery_item_id else None,
                 proposed_product=proposal.product_name if proposal else None,
@@ -587,7 +619,6 @@ async def commit_order(request: Request):
             )
             db.add(log_entry)
 
-            # Learn from corrections
             if added:
                 image_url = data.get("image_url") or (proposal.image_url if proposal else None)
                 _learn_from_result(
@@ -607,40 +638,151 @@ async def commit_order(request: Request):
             elif not checked_off:
                 reason = "Added but could not check off Alexa list"
 
-            results.append({
+            commit_results.append({
                 "text": alexa_text,
                 "product": product_name,
                 "success": added,
                 "reason": reason,
             })
+            commit_count += 1
+            await q.put(("done", idx, alexa_text, added, reason, commit_count, total))
 
         db.commit()
+
+        added_count = sum(1 for r in commit_results if r["success"] and not r.get("skipped"))
+        skipped_count = sum(1 for r in commit_results if r.get("skipped"))
+        await q.put(("complete", added_count, skipped_count, len(commit_results)))
 
     except Exception as e:
         logger.exception("Error during commit")
         db.rollback()
-        return HTMLResponse(
-            f'<div class="status-message status-error">Error: {html_escape(str(e))}</div>'
-        )
+        await q.put(("error", str(e)))
     finally:
         await alexa_client.close()
         await instacart_agent.close()
         db.close()
 
-    # Build results HTML
-    added_count = sum(1 for r in results if r["success"] and not r.get("skipped"))
-    skipped_count = sum(1 for r in results if r.get("skipped"))
-    html = templates.get_template("partials/commit_results.html").render(
-        results=results,
-        added_count=added_count,
-        skipped_count=skipped_count,
-        total_count=len(results),
+
+@router.get("/commit-progress/{session_id}")
+async def commit_progress_stream(session_id: str):
+    """SSE stream for commit progress — uses queue for reliable event delivery."""
+
+    async def generate():
+        session = _sessions.get(session_id)
+        if not session or not session.commit_queue:
+            yield {"event": "progress", "data": '<div class="status-message status-error">Session not found</div>'}
+            yield {"event": "close", "data": ""}
+            return
+
+        q = session.commit_queue
+
+        while True:
+            try:
+                event = await asyncio.wait_for(q.get(), timeout=120)
+            except asyncio.TimeoutError:
+                yield {
+                    "event": "progress",
+                    "data": '<div class="status-message status-error">Commit timed out.</div>',
+                }
+                yield {"event": "close", "data": ""}
+                _sessions.pop(session_id, None)
+                return
+
+            event_type = event[0]
+
+            if event_type == "complete":
+                _, added_count, skipped_count, total_count = event
+                summary = (
+                    f'<div class="results-summary card">'
+                    f"<h3>Order Complete</h3>"
+                    f'<p class="muted" style="margin-bottom:1rem">'
+                    f"{added_count} of {total_count} items added to cart"
+                )
+                if skipped_count:
+                    summary += f", {skipped_count} skipped"
+                summary += (
+                    f"</p>"
+                    f'<a href="/order/" class="btn btn-primary">Start New Order</a>'
+                    f"</div>"
+                )
+                yield {"event": "progress", "data": summary}
+                yield {"event": "close", "data": ""}
+                _sessions.pop(session_id, None)
+                return
+
+            if event_type == "error":
+                _, error_msg = event
+                yield {
+                    "event": "progress",
+                    "data": f'<div class="status-message status-error">Error: {html_escape(error_msg)}</div>',
+                }
+                yield {"event": "close", "data": ""}
+                _sessions.pop(session_id, None)
+                return
+
+            if event_type == "skip":
+                _, idx, alexa_text, count, total = event
+                oob = (
+                    f'<div id="status-{idx}" hx-swap-oob="innerHTML">'
+                    f'<span class="badge badge-substituted">&mdash; Skipped</span>'
+                    f"</div>"
+                )
+                yield {"event": "progress", "data": _commit_progress_bar(count, total) + oob}
+
+            elif event_type == "active":
+                _, idx, alexa_text, count, total = event
+                oob = (
+                    f'<div id="status-{idx}" hx-swap-oob="innerHTML">'
+                    f'<span class="badge badge-new commit-pulse">Adding...</span>'
+                    f"</div>"
+                )
+                pct = int(count / total * 100) if total > 0 else 0
+                progress = (
+                    f'<div class="progress-container">'
+                    f'<div class="progress-bar">'
+                    f'<div class="progress-fill" style="width: {pct}%"></div>'
+                    f"</div>"
+                    f'<p class="progress-text">'
+                    f"Adding item {count + 1} of {total} &mdash; {html_escape(alexa_text)}"
+                    f"</p></div>"
+                )
+                yield {"event": "progress", "data": progress + oob}
+
+            elif event_type == "done":
+                _, idx, alexa_text, success, reason, count, total = event
+                if success:
+                    badge_class = "badge-matched"
+                    badge_text = "&#10003; Added"
+                    if reason:
+                        badge_text = "&#10003; Added"
+                        extra = f'<span class="muted" style="font-size:0.75rem;display:block">{html_escape(reason)}</span>'
+                    else:
+                        extra = ""
+                else:
+                    badge_class = "badge-error"
+                    badge_text = f"&#10007; {html_escape(reason or 'Failed')}"
+                    extra = ""
+                oob = (
+                    f'<div id="status-{idx}" hx-swap-oob="innerHTML">'
+                    f'<span class="badge {badge_class}">{badge_text}</span>{extra}'
+                    f"</div>"
+                )
+                yield {"event": "progress", "data": _commit_progress_bar(count, total) + oob}
+
+    return EventSourceResponse(generate())
+
+
+def _commit_progress_bar(count: int, total: int) -> str:
+    """Render the commit progress bar HTML."""
+    pct = int(count / total * 100) if total > 0 else 0
+    return (
+        f'<div class="progress-container">'
+        f'<div class="progress-bar">'
+        f'<div class="progress-fill" style="width: {pct}%"></div>'
+        f"</div>"
+        f'<p class="progress-text">Added {count} of {total}</p>'
+        f"</div>"
     )
-
-    # Clean up session
-    del _sessions[session_id]
-
-    return HTMLResponse(html)
 
 
 def _learn_from_result(

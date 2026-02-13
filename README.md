@@ -9,7 +9,7 @@ Automate your grocery ordering: read your Alexa shopping list, match items to In
 3. **Search** — Uses browser-use AI agent to find products on Instacart
 4. **Review** — Shows a table of proposed matches; you can accept or swap any item
 5. **Commit** — Adds items to your Instacart cart and checks them off your Alexa list
-6. **Learn** — Saves your corrections so future orders get smarter
+6. **Learn** — Saves your corrections so future orders get smarter (deduplicates by product URL)
 
 ## Setup
 
@@ -68,7 +68,7 @@ Open http://127.0.0.1:8000 in your browser.
 2. A Chrome window opens — log into Amazon and Instacart if prompted (first time only; sessions persist across runs)
 3. The app fetches your Alexa list and searches Instacart for each item
 4. Review the proposed matches — pick alternatives or paste a custom Instacart URL
-5. Click "Add All to Cart" to commit
+5. Click "Add All to Cart" — live progress updates show each item being added to your cart and checked off the Alexa list
 
 ### Manage Preferences
 
@@ -80,14 +80,14 @@ Visit `/preferences` to:
 
 ### Order History
 
-Visit `/order/history` to see past orders and which items were corrected.
+Visit `/order/history` to see past orders and which items were corrected. You can delete individual sessions or clear all history.
 
 ## Architecture
 
 - **FastAPI** + **Jinja2** + **htmx** — server-rendered UI with dynamic updates
 - **SQLite** via **SQLAlchemy** — preference database (aliases, ranked products, order log)
 - **browser-use** — AI-powered browser automation for Instacart
-- **SSE** — real-time progress updates during search phase
+- **SSE** — real-time progress updates during search and commit phases
 
 ## File Structure
 

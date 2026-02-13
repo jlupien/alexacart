@@ -116,9 +116,41 @@ def add_preferred_product(
 ) -> PreferredProduct:
     """
     Add a preferred product for a grocery item.
+    If a product with the same URL already exists, update it instead of creating a duplicate.
     If rank is None, append at the end.
     If rank is specified, shift existing products down.
     """
+    # Deduplicate by URL first, then by name
+    existing = None
+    if product_url:
+        existing = (
+            db.query(PreferredProduct)
+            .filter(
+                PreferredProduct.grocery_item_id == grocery_item_id,
+                PreferredProduct.product_url == product_url,
+            )
+            .first()
+        )
+    if not existing:
+        existing = (
+            db.query(PreferredProduct)
+            .filter(
+                PreferredProduct.grocery_item_id == grocery_item_id,
+                PreferredProduct.product_name == product_name,
+            )
+            .first()
+        )
+    if existing:
+        existing.product_name = product_name
+        if brand:
+            existing.brand = brand
+        if image_url:
+            existing.image_url = image_url
+        if product_url:
+            existing.product_url = product_url
+        db.flush()
+        return existing
+
     if rank is None:
         max_rank = (
             db.query(PreferredProduct.rank)
@@ -183,18 +215,36 @@ def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str
     If it already exists, move it to rank 1. Otherwise, add it at rank 1.
     Used when the user corrects a proposal during order review.
     """
-    existing = (
-        db.query(PreferredProduct)
-        .filter(
-            PreferredProduct.grocery_item_id == grocery_item_id,
-            PreferredProduct.product_name == product_name,
+    # Match by URL first, then by name
+    existing = None
+    if product_url:
+        existing = (
+            db.query(PreferredProduct)
+            .filter(
+                PreferredProduct.grocery_item_id == grocery_item_id,
+                PreferredProduct.product_url == product_url,
+            )
+            .first()
         )
-        .first()
-    )
+    if not existing:
+        existing = (
+            db.query(PreferredProduct)
+            .filter(
+                PreferredProduct.grocery_item_id == grocery_item_id,
+                PreferredProduct.product_name == product_name,
+            )
+            .first()
+        )
 
     if existing:
-        if image_url and not existing.image_url:
+        # Update fields that may have changed
+        existing.product_name = product_name
+        if image_url:
             existing.image_url = image_url
+        if brand:
+            existing.brand = brand
+        if product_url:
+            existing.product_url = product_url
         if existing.rank == 1:
             db.flush()
             return existing

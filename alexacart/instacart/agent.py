@@ -155,27 +155,63 @@ class InstacartAgent:
         )
         return await agent.run(max_steps=max_steps)
 
-    async def _ensure_service_logged_in(
-        self, service_name: str, check_task: str, poll_task: str
-    ) -> bool:
-        """Generic login check + poll loop. Returns True once logged in."""
-        history = await self._run_agent(check_task)
-        raw = str(history.final_result() or "")
+    async def _run_js(self, js_code: str) -> str:
+        """Run JavaScript on the current page and return the string result."""
+        session = await self._get_session()
+        cdp_session = await session.get_or_create_cdp_session(target_id=None)
+        resp = await cdp_session.cdp_client.send.Runtime.evaluate(
+            params={"expression": js_code, "returnByValue": True},
+            session_id=cdp_session.session_id,
+        )
+        return str(resp.get("result", {}).get("value", ""))
 
-        if "LOGGED_IN" in raw.upper() and "NEEDS_LOGIN" not in raw.upper():
-            logger.info("Already logged into %s", service_name)
+    async def _ensure_started(self):
+        """Ensure the browser session is started."""
+        session = await self._get_session()
+        try:
+            session.cdp_client
+        except (AssertionError, AttributeError):
+            await session.start()
+        return session
+
+    async def _ensure_service_logged_in(
+        self,
+        service_name: str,
+        check_url: str,
+        login_url: str,
+        check_js: str,
+        poll_js: str,
+    ) -> bool:
+        """
+        Fast login check via JS (no LLM call).
+        Navigate to check_url, run check_js. If not logged in, navigate to
+        login_url and poll with poll_js every 3s until logged in or timeout.
+        """
+        session = await self._ensure_started()
+
+        await session.navigate_to(check_url)
+        await asyncio.sleep(2)
+
+        try:
+            result = await self._run_js(check_js)
+        except Exception as e:
+            logger.warning("JS login check failed for %s: %s", service_name, e)
+            result = ""
+
+        if "LOGGED_IN" in result.upper() and "NEEDS_LOGIN" not in result.upper():
+            logger.info("Already logged into %s (fast check)", service_name)
             return True
 
-        logger.info("Not logged into %s — waiting for manual login...", service_name)
+        # Not logged in — navigate to login page directly
+        logger.info("Not logged into %s — navigating to login page...", service_name)
+        await session.navigate_to(login_url)
 
-        for _ in range(60):  # Up to ~10 minutes
-            await asyncio.sleep(10)
+        # Poll with JS every 3s (much faster than LLM-based polling)
+        for _ in range(200):  # Up to ~10 minutes
+            await asyncio.sleep(3)
             try:
-                poll_history = await self._run_agent(
-                    poll_task, max_actions_per_step=2, max_steps=3
-                )
-                poll_raw = str(poll_history.final_result() or "")
-                if "LOGGED_IN" in poll_raw.upper() and "NEEDS_LOGIN" not in poll_raw.upper():
+                poll_result = await self._run_js(poll_js)
+                if "LOGGED_IN" in poll_result.upper() and "NEEDS_LOGIN" not in poll_result.upper():
                     logger.info("User logged into %s successfully", service_name)
                     return True
             except Exception:
@@ -185,46 +221,66 @@ class InstacartAgent:
         return False
 
     async def ensure_logged_in(self) -> bool:
-        """Check if logged into Instacart. If not, navigate to login and poll."""
-        check_task = (
-            f"Go to {INSTACART_BASE} . "
-            f"Check if the user is logged into Instacart. "
-            f"Look for signs of being logged in: a user/account icon in the header, "
-            f"a cart icon with items, or a store page showing products. "
-            f"If you see a 'Log in' or 'Sign up' button, the user is NOT logged in — "
-            f"click 'Log in' to go to the login page and say 'NEEDS_LOGIN'. "
-            f"If already logged in, say 'LOGGED_IN'. "
-            f"{DISMISS_MODALS}"
+        """Check if logged into Instacart via fast JS check."""
+        check_js = """
+            (function() {
+                var links = document.querySelectorAll('a, button');
+                for (var i = 0; i < links.length; i++) {
+                    var text = (links[i].textContent || '').trim();
+                    if (text === 'Log in' || text === 'Sign up') return 'NEEDS_LOGIN';
+                }
+                return 'LOGGED_IN';
+            })()
+        """
+        poll_js = """
+            (function() {
+                var url = window.location.href;
+                if (/\\/login|\\/signup/i.test(url)) return 'NEEDS_LOGIN';
+                return 'LOGGED_IN';
+            })()
+        """
+        return await self._ensure_service_logged_in(
+            "Instacart",
+            INSTACART_BASE,
+            f"{INSTACART_BASE}/login",
+            check_js,
+            poll_js,
         )
-        poll_task = (
-            f"Look at the current page. "
-            f"If this is still a login/sign-up page, say 'NEEDS_LOGIN'. "
-            f"If the user has logged in (you see a store page, account icon, "
-            f"or home page with products), say 'LOGGED_IN'. "
-            f"{DISMISS_MODALS}"
-        )
-        return await self._ensure_service_logged_in("Instacart", check_task, poll_task)
 
     async def ensure_amazon_logged_in(self) -> bool:
-        """Check if logged into Amazon. If not, navigate to login and poll."""
-        check_task = (
-            "Go to https://www.amazon.com . "
-            "Check if the user is logged into Amazon. "
-            "Look for signs of being logged in: a greeting like 'Hello, [Name]' "
-            "in the header, or an 'Account & Lists' dropdown showing a name. "
-            "If you see a 'Sign in' link/button or 'Hello, sign in', the user is NOT logged in — "
-            "click 'Sign in' to go to the login page and say 'NEEDS_LOGIN'. "
-            "If already logged in, say 'LOGGED_IN'. "
-            f"{DISMISS_MODALS}"
+        """Check if logged into Amazon via fast JS check."""
+        check_js = """
+            (function() {
+                var el = document.getElementById('nav-link-accountList');
+                if (!el) return 'NEEDS_LOGIN';
+                var text = el.innerText || el.textContent || '';
+                if (/sign in/i.test(text)) return 'NEEDS_LOGIN';
+                return 'LOGGED_IN';
+            })()
+        """
+        # Poll using the same DOM check — URL-based polling is unreliable
+        # because the sign-in URL can 404 or change across redirects.
+        # On sign-in pages (no #nav-link-accountList), returns NEEDS_LOGIN.
+        # After login redirect back to amazon.com, detects LOGGED_IN.
+        poll_js = check_js
+        return await self._ensure_service_logged_in(
+            "Amazon",
+            "https://www.amazon.com",
+            "https://www.amazon.com",
+            check_js,
+            poll_js,
         )
-        poll_task = (
-            "Look at the current page. "
-            "If this is still an Amazon login/sign-in page, say 'NEEDS_LOGIN'. "
-            "If the user has logged in (you see 'Hello, [Name]' or an account page), "
-            "say 'LOGGED_IN'. "
-            f"{DISMISS_MODALS}"
-        )
-        return await self._ensure_service_logged_in("Amazon", check_task, poll_task)
+
+    async def ensure_amazon_logged_in_and_get_cookies(self) -> dict | None:
+        """
+        Check Amazon login, then navigate to alexa.amazon.com to establish
+        Alexa session cookies and extract them — all in one flow.
+        Returns cookie data dict on success, None if login failed.
+        """
+        ok = await self.ensure_amazon_logged_in()
+        if not ok:
+            return None
+        return await self.get_amazon_cookies()
 
     async def get_amazon_cookies(self) -> dict:
         """
@@ -233,13 +289,7 @@ class InstacartAgent:
         (csrf token, etc.) which are separate from www.amazon.com cookies.
         Returns cookie data in the format expected by AlexaClient.
         """
-        session = await self._get_session()
-
-        # Ensure browser is initialized (agent.run() should have started it already)
-        try:
-            session.cdp_client  # property raises if not connected
-        except (AssertionError, AttributeError):
-            await session.start()
+        session = await self._ensure_started()
 
         # Visit alexa.amazon.com to establish Alexa session cookies (csrf, etc.)
         # These are on a different domain than www.amazon.com and won't exist
@@ -653,3 +703,186 @@ class InstacartAgent:
             except Exception as e:
                 logger.warning("Error stopping browser session: %s", e)
             self._session = None
+
+
+class BrowserPool:
+    """
+    Persistent pool of InstacartAgent browser instances.
+
+    - Runs Amazon + Instacart auth in parallel on 2 visible browsers
+    - Spins up remaining headless workers concurrently
+    - Injects Instacart cookies into all workers after auth
+    - Persists across search and commit phases
+    """
+
+    def __init__(self, size: int):
+        self._size = max(size, 2)
+        self._agents: list[InstacartAgent] = []
+        self._queue: asyncio.Queue[InstacartAgent] = asyncio.Queue()
+        self._closed = False
+        # Index of the Amazon auth agent (for cookie refresh)
+        self._amazon_agent_idx = 0
+
+    async def start_with_auth(self) -> tuple[bool, bool, dict | None]:
+        """
+        Start the pool with parallel auth:
+        1. Create 2 visible browsers (pool-0=Amazon, pool-1=Instacart)
+        2. Start N-2 headless workers in the background
+        3. Run Amazon + Instacart auth in parallel
+        4. Inject Instacart cookies from pool-1 into all other agents
+        5. Populate the work queue
+
+        Returns (amazon_ok, instacart_ok, cookie_data).
+        """
+        # Debug: wipe browser profile cookies to force re-login
+        if settings.debug_clear_amazon_cookies:
+            self._clear_profile_cookies(settings.resolved_data_dir / "browser-profile-pool-0")
+        if settings.debug_clear_instacart_cookies:
+            self._clear_profile_cookies(settings.resolved_data_dir / "browser-profile")
+
+        # Create the two auth agents (visible)
+        # pool-0 (Amazon auth) gets its own profile for Amazon cookies
+        # pool-1 (Instacart auth) uses the default profile to preserve existing cookies
+        amazon_agent = InstacartAgent(profile_suffix="pool-0", headless=False)
+        instacart_agent = InstacartAgent(headless=False)
+        self._agents = [amazon_agent, instacart_agent]
+
+        # Start headless workers in background
+        worker_count = self._size - 2
+        worker_task = None
+        if worker_count > 0:
+            worker_task = asyncio.create_task(self._start_workers(worker_count))
+
+        # Run auth in parallel
+        amazon_result, instacart_result = await asyncio.gather(
+            amazon_agent.ensure_amazon_logged_in_and_get_cookies(),
+            instacart_agent.ensure_logged_in(),
+            return_exceptions=True,
+        )
+
+        # Process Amazon result
+        amazon_ok = False
+        cookie_data = None
+        if isinstance(amazon_result, Exception):
+            logger.error("Amazon auth failed: %s", amazon_result)
+        elif amazon_result is not None:
+            amazon_ok = True
+            cookie_data = amazon_result
+
+        # Process Instacart result
+        instacart_ok = False
+        if isinstance(instacart_result, Exception):
+            logger.error("Instacart auth failed: %s", instacart_result)
+        elif instacart_result:
+            instacart_ok = True
+
+        if not instacart_ok:
+            return amazon_ok, instacart_ok, cookie_data
+
+        # Wait for workers to finish starting
+        if worker_task:
+            try:
+                await worker_task
+            except Exception as e:
+                logger.warning("Worker startup had errors: %s", e)
+
+        # Extract Instacart cookies from pool-1 and inject into all others
+        try:
+            ic_cookies = await instacart_agent.extract_all_cookies()
+            inject_tasks = []
+            for i, agent in enumerate(self._agents):
+                if i == 1:  # Skip pool-1 (already has cookies)
+                    continue
+                inject_tasks.append(agent.inject_cookies(ic_cookies))
+            if inject_tasks:
+                results = await asyncio.gather(*inject_tasks, return_exceptions=True)
+                for i, r in enumerate(results):
+                    if isinstance(r, Exception):
+                        logger.warning("Cookie injection failed for agent: %s", r)
+        except Exception as e:
+            logger.warning("Failed to extract/inject Instacart cookies: %s", e)
+
+        # Populate work queue with all agents
+        for agent in self._agents:
+            self._queue.put_nowait(agent)
+
+        logger.info(
+            "BrowserPool started: %d agents (%d auth + %d workers)",
+            len(self._agents), 2, len(self._agents) - 2,
+        )
+        return amazon_ok, instacart_ok, cookie_data
+
+    @staticmethod
+    def _clear_profile_cookies(profile_dir):
+        """Delete cookie files from a Chrome profile directory."""
+        import shutil
+
+        if not profile_dir.exists():
+            return
+        # Chrome stores cookies in Default/Cookies and Default/Network/Cookies
+        for rel in ("Default/Cookies", "Default/Cookies-journal",
+                     "Default/Network/Cookies", "Default/Network/Cookies-journal"):
+            p = profile_dir / rel
+            if p.exists():
+                p.unlink()
+                logger.info("Cleared cookies: %s", p)
+        # Also clear session storage cookies
+        session_dir = profile_dir / "Default" / "Session Storage"
+        if session_dir.exists():
+            shutil.rmtree(session_dir, ignore_errors=True)
+            logger.info("Cleared session storage: %s", session_dir)
+
+    async def _start_workers(self, count: int):
+        """Start headless worker agents and add them to self._agents."""
+
+        async def _make_worker(i: int) -> InstacartAgent:
+            agent = InstacartAgent(profile_suffix=f"pool-{i + 2}", headless=True)
+            await agent._ensure_started()
+            return agent
+
+        results = await asyncio.gather(
+            *[_make_worker(i) for i in range(count)],
+            return_exceptions=True,
+        )
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.warning("Failed to start worker pool-%d: %s", i + 2, result)
+            else:
+                self._agents.append(result)
+
+    async def acquire(self) -> InstacartAgent:
+        """Get an agent from the pool (blocks until one is available)."""
+        return await self._queue.get()
+
+    def release(self, agent: InstacartAgent):
+        """Return an agent to the pool."""
+        if not self._closed:
+            self._queue.put_nowait(agent)
+
+    async def refresh_amazon_cookies(self) -> dict:
+        """Get fresh Amazon cookies using the Amazon auth agent."""
+        agent = self._agents[self._amazon_agent_idx]
+        return await agent.get_amazon_cookies()
+
+    async def close(self):
+        """Close all browser sessions in the pool."""
+        if self._closed:
+            return
+        self._closed = True
+        # Drain the queue
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        # Close all agents
+        close_tasks = []
+        for agent in self._agents:
+            close_tasks.append(agent.close())
+        if close_tasks:
+            results = await asyncio.gather(*close_tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, Exception):
+                    logger.warning("Error closing pool agent: %s", r)
+        self._agents.clear()
+        logger.info("BrowserPool closed")

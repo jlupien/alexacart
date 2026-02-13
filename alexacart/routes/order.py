@@ -23,6 +23,7 @@ from sse_starlette.sse import EventSourceResponse
 from sqlalchemy.orm import Session
 
 from alexacart.app import templates
+from alexacart.config import settings
 from alexacart.db import SessionLocal, get_db
 from alexacart.matching.matcher import (
     add_preferred_product,
@@ -82,6 +83,9 @@ class OrderSession:
     # Commit state (queue-based for reliable SSE delivery)
     commit_queue: asyncio.Queue | None = None
     commit_items_data: dict = field(default_factory=dict)
+    active_commits: set = field(default_factory=set)
+    # Persistent browser pool (shared between search and commit)
+    browser_pool: object | None = None
 
 
 @router.get("/")
@@ -117,29 +121,30 @@ async def _run_order(session: OrderSession):
     """Background task: check logins, fetch Alexa list, then search Instacart."""
     from alexacart.alexa.auth import save_cookies
     from alexacart.alexa.client import AlexaClient
-    from alexacart.instacart.agent import InstacartAgent
+    from alexacart.instacart.agent import BrowserPool
 
-    agent = InstacartAgent()
+    pool = BrowserPool(settings.search_concurrency)
+    session.browser_pool = pool
 
     try:
-        # Step 1: Ensure logged into both Amazon and Instacart
+        # Step 1: Parallel auth — Amazon + Instacart on 2 visible browsers,
+        # headless workers starting in background
         session.status = "logging_in"
 
-        amazon_ok = await agent.ensure_amazon_logged_in()
-        if not amazon_ok:
+        amazon_ok, instacart_ok, cookie_data = await pool.start_with_auth()
+
+        if not amazon_ok or not cookie_data:
             session.error = "Timed out waiting for Amazon login. Please try again."
             session.status = "error"
             return
 
-        instacart_ok = await agent.ensure_logged_in()
         if not instacart_ok:
             session.error = "Timed out waiting for Instacart login. Please try again."
             session.status = "error"
             return
 
-        # Step 2: Extract fresh Amazon/Alexa cookies from the browser and save them
+        # Step 2: Save cookies and fetch Alexa list
         session.status = "fetching_list"
-        cookie_data = await agent.get_amazon_cookies()
         if not cookie_data.get("cookies"):
             session.error = "Could not extract Amazon cookies from browser. Please try again."
             session.status = "error"
@@ -148,7 +153,7 @@ async def _run_order(session: OrderSession):
 
         # Step 3: Fetch Alexa shopping list using fresh cookies
         # Pass browser cookie refresh so 401s auto-recover
-        alexa_client = AlexaClient(cookie_refresh_fn=agent.get_amazon_cookies)
+        alexa_client = AlexaClient(cookie_refresh_fn=pool.refresh_amazon_cookies)
         try:
             items = await alexa_client.get_items()
         except Exception as e:
@@ -184,15 +189,16 @@ async def _run_order(session: OrderSession):
                 )
             )
 
-        # Step 4: Search Instacart for each item
-        await _search_items(session, agent)
+        # Step 4: Search Instacart for each item (pool is already running)
+        await _search_items(session, pool)
 
     except Exception as e:
         logger.exception("Order flow failed")
         session.error = str(e)
         session.status = "error"
-    finally:
-        await agent.close()
+        # Close pool on error (commit won't happen)
+        await pool.close()
+        session.browser_pool = None
 
 
 async def _apply_search_results(
@@ -227,10 +233,10 @@ async def _apply_search_results(
 
 
 async def _search_single_item(
-    session: OrderSession, proposal: ProposalItem, agent_pool: asyncio.Queue
+    session: OrderSession, proposal: ProposalItem, pool,
 ):
     """Search Instacart for a single item using a worker from the pool."""
-    worker = await agent_pool.get()
+    worker = await pool.acquire()
     db = SessionLocal()
 
     session.active_searches.add(proposal.alexa_text)
@@ -281,39 +287,23 @@ async def _search_single_item(
         session.active_searches.discard(proposal.alexa_text)
         session.searched_count += 1
         db.close()
-        agent_pool.put_nowait(worker)
+        pool.release(worker)
 
 
-async def _search_items(session: OrderSession, agent):
-    """Search Instacart for each item in the session — in parallel."""
-    from alexacart.config import settings
-
+async def _search_items(session: OrderSession, pool):
+    """Search Instacart for each item in the session — in parallel via BrowserPool."""
     session.status = "searching"
-    concurrency = settings.search_concurrency
-    workers = []
 
     try:
-        # Create headless worker pool (main agent + N-1 workers)
-        if concurrency > 1:
-            try:
-                workers = await agent.create_search_pool(concurrency - 1)
-            except Exception as e:
-                logger.warning("Failed to create search worker pool: %s", e)
-
-        all_agents = [agent] + workers
-        agent_pool: asyncio.Queue = asyncio.Queue()
-        for a in all_agents:
-            agent_pool.put_nowait(a)
-
         logger.info(
-            "Searching %d items with %d parallel agents",
-            len(session.proposals), agent_pool.qsize(),
+            "Searching %d items with BrowserPool (%d agents)",
+            len(session.proposals), pool._size,
         )
 
         # Launch all searches concurrently — pool limits actual parallelism
         results = await asyncio.gather(
             *[
-                _search_single_item(session, proposal, agent_pool)
+                _search_single_item(session, proposal, pool)
                 for proposal in session.proposals
             ],
             return_exceptions=True,
@@ -329,13 +319,6 @@ async def _search_items(session: OrderSession, agent):
         logger.exception("Search task failed")
         session.error = str(e)
         session.status = "ready"
-    finally:
-        # Close worker sessions (not the main agent — caller handles that)
-        for w in workers:
-            try:
-                await w.close()
-            except Exception as e:
-                logger.warning("Error closing search worker: %s", e)
 
 
 @router.get("/progress/{session_id}")
@@ -575,113 +558,165 @@ async def commit_order(request: Request):
     )
 
 
-async def _run_commit(session: OrderSession):
-    """Background task: add items to Instacart cart and check off Alexa list."""
-    from alexacart.alexa.client import AlexaClient, AlexaListItem
-    from alexacart.instacart.agent import InstacartAgent
+async def _commit_single_item(
+    session: OrderSession,
+    idx: int,
+    data: dict,
+    pool,
+    alexa_client,
+    q: asyncio.Queue,
+    total: int,
+    commit_counter: list,
+) -> dict:
+    """Add a single item to Instacart cart and check off Alexa list."""
+    from alexacart.alexa.client import AlexaListItem
 
-    instacart_agent = InstacartAgent()
-    alexa_client = AlexaClient(cookie_refresh_fn=instacart_agent.get_amazon_cookies)
+    product_name = data.get("product_name", "")
+    alexa_text = data.get("alexa_text", "")
+    grocery_item_id = data.get("grocery_item_id", "")
+    alexa_item_id = data.get("alexa_item_id", "")
+
+    if data.get("skip") == "1":
+        await q.put(("skip", idx, alexa_text, commit_counter[0], total))
+        return {"text": alexa_text, "success": True, "reason": "Skipped", "skipped": True}
+
+    if not product_name:
+        commit_counter[0] += 1
+        await q.put(("done", idx, alexa_text, False, "No product selected", commit_counter[0], total))
+        return {"text": alexa_text, "success": False, "reason": "No product selected"}
+
+    worker = await pool.acquire()
     db = SessionLocal()
-    q = session.commit_queue
-    commit_results = []
-    commit_count = 0
-    total = sum(1 for d in session.commit_items_data.values() if d.get("skip") != "1")
 
+    session.active_commits.add(alexa_text)
     try:
-        for idx, data in sorted(session.commit_items_data.items()):
-            product_name = data.get("product_name", "")
-            alexa_text = data.get("alexa_text", "")
-            grocery_item_id = data.get("grocery_item_id", "")
-            alexa_item_id = data.get("alexa_item_id", "")
+        logger.info("Commit: pushing 'active' for idx=%s text=%s", idx, alexa_text)
+        await q.put(("active", idx, alexa_text, commit_counter[0], total))
 
-            if data.get("skip") == "1":
-                commit_results.append(
-                    {"text": alexa_text, "success": True, "reason": "Skipped", "skipped": True}
-                )
-                await q.put(("skip", idx, alexa_text, commit_count, total))
-                continue
+        proposal = None
+        for p in session.proposals:
+            if p.index == idx:
+                proposal = p
+                break
 
-            if not product_name:
-                commit_results.append(
-                    {"text": alexa_text, "success": False, "reason": "No product selected"}
-                )
-                commit_count += 1
-                await q.put(("done", idx, alexa_text, False, "No product selected", commit_count, total))
-                continue
+        product_url = data.get("product_url", "")
+        added = await worker.add_to_cart(product_name, product_url=product_url or None)
+        checked_off = True
 
-            # Signal "active" — this item is being processed now
-            logger.info("Commit: pushing 'active' for idx=%s text=%s", idx, alexa_text)
-            await q.put(("active", idx, alexa_text, commit_count, total))
-
-            # Find the original proposal
-            proposal = None
-            for p in session.proposals:
-                if p.index == idx:
-                    proposal = p
-                    break
-
-            # Add to Instacart cart — use URL if available
-            product_url = data.get("product_url", "")
-            added = await instacart_agent.add_to_cart(product_name, product_url=product_url or None)
-            checked_off = True
-
-            if added and alexa_item_id:
-                alexa_item = AlexaListItem(
-                    item_id=alexa_item_id,
-                    text=alexa_text,
-                    list_id=proposal.alexa_list_id if proposal else "",
-                    version=proposal.alexa_item_version if proposal else 1,
-                )
-                checked_off = await alexa_client.mark_complete(alexa_item)
-                if not checked_off:
-                    logger.warning("Could not check off '%s' on Alexa list", alexa_text)
-
-            was_corrected = False
-            if proposal and proposal.product_name and proposal.product_name != product_name:
-                was_corrected = True
-
-            log_entry = OrderLog(
-                session_id=session.session_id,
-                alexa_text=alexa_text,
-                matched_grocery_item_id=int(grocery_item_id) if grocery_item_id else None,
-                proposed_product=proposal.product_name if proposal else None,
-                final_product=product_name,
-                was_corrected=was_corrected,
-                added_to_cart=added,
+        if added and alexa_item_id and not settings.skip_alexa_checkoff:
+            alexa_item = AlexaListItem(
+                item_id=alexa_item_id,
+                text=alexa_text,
+                list_id=proposal.alexa_list_id if proposal else "",
+                version=proposal.alexa_item_version if proposal else 1,
             )
-            db.add(log_entry)
+            checked_off = await alexa_client.mark_complete(alexa_item)
+            if not checked_off:
+                logger.warning("Could not check off '%s' on Alexa list", alexa_text)
+        elif settings.skip_alexa_checkoff:
+            logger.info("Skipping Alexa check-off for '%s' (SKIP_ALEXA_CHECKOFF=true)", alexa_text)
 
-            if added:
-                image_url = data.get("image_url") or (proposal.image_url if proposal else None)
-                _learn_from_result(
-                    db,
-                    alexa_text=alexa_text,
-                    grocery_item_id=int(grocery_item_id) if grocery_item_id else None,
-                    final_product=product_name,
-                    product_url=product_url or None,
-                    brand=data.get("brand"),
-                    image_url=image_url,
-                    was_corrected=was_corrected,
-                )
+        was_corrected = False
+        if proposal and proposal.product_name and proposal.product_name != product_name:
+            was_corrected = True
 
-            reason = ""
-            if not added:
-                reason = "Failed to add to cart"
-            elif not checked_off:
-                reason = "Added but could not check off Alexa list"
+        log_entry = OrderLog(
+            session_id=session.session_id,
+            alexa_text=alexa_text,
+            matched_grocery_item_id=int(grocery_item_id) if grocery_item_id else None,
+            proposed_product=proposal.product_name if proposal else None,
+            final_product=product_name,
+            was_corrected=was_corrected,
+            added_to_cart=added,
+        )
+        db.add(log_entry)
 
-            commit_results.append({
-                "text": alexa_text,
-                "product": product_name,
-                "success": added,
-                "reason": reason,
-            })
-            commit_count += 1
-            logger.info("Commit: pushing 'done' for idx=%s text=%s added=%s", idx, alexa_text, added)
-            await q.put(("done", idx, alexa_text, added, reason, commit_count, total))
+        if added:
+            image_url = data.get("image_url") or (proposal.image_url if proposal else None)
+            _learn_from_result(
+                db,
+                alexa_text=alexa_text,
+                grocery_item_id=int(grocery_item_id) if grocery_item_id else None,
+                final_product=product_name,
+                product_url=product_url or None,
+                brand=data.get("brand"),
+                image_url=image_url,
+                was_corrected=was_corrected,
+            )
 
         db.commit()
+
+        reason = ""
+        if not added:
+            reason = "Failed to add to cart"
+        elif not checked_off:
+            reason = "Added but could not check off Alexa list"
+
+        result = {
+            "text": alexa_text,
+            "product": product_name,
+            "success": added,
+            "reason": reason,
+        }
+        commit_counter[0] += 1
+        logger.info("Commit: pushing 'done' for idx=%s text=%s added=%s", idx, alexa_text, added)
+        await q.put(("done", idx, alexa_text, added, reason, commit_counter[0], total))
+        return result
+
+    except Exception as e:
+        logger.error("Commit failed for '%s': %s", alexa_text, e)
+        db.rollback()
+        commit_counter[0] += 1
+        await q.put(("done", idx, alexa_text, False, str(e), commit_counter[0], total))
+        return {"text": alexa_text, "success": False, "reason": str(e)}
+    finally:
+        session.active_commits.discard(alexa_text)
+        db.close()
+        pool.release(worker)
+
+
+async def _run_commit(session: OrderSession):
+    """Background task: add items to Instacart cart and check off Alexa list — in parallel."""
+    from alexacart.alexa.client import AlexaClient
+    from alexacart.instacart.agent import BrowserPool
+
+    pool = session.browser_pool
+    if pool is None:
+        # Edge case: pool lost — create a fresh one (no auth, just headless workers)
+        logger.warning("Browser pool not found on session — creating fresh pool")
+        pool = BrowserPool(settings.search_concurrency)
+        session.browser_pool = pool
+        await pool.start_with_auth()
+
+    alexa_client = AlexaClient(cookie_refresh_fn=pool.refresh_amazon_cookies)
+    q = session.commit_queue
+    total = sum(1 for d in session.commit_items_data.values() if d.get("skip") != "1")
+    commit_counter = [0]  # mutable counter shared across parallel tasks
+
+    try:
+        logger.info(
+            "Committing %d items with BrowserPool (%d agents)",
+            len(session.commit_items_data), pool._size,
+        )
+
+        # Launch all commits concurrently — pool limits actual parallelism
+        results = await asyncio.gather(
+            *[
+                _commit_single_item(
+                    session, idx, data, pool, alexa_client, q, total, commit_counter,
+                )
+                for idx, data in sorted(session.commit_items_data.items())
+            ],
+            return_exceptions=True,
+        )
+
+        commit_results = []
+        for r in results:
+            if isinstance(r, Exception):
+                logger.error("Commit task failed: %s", r)
+                commit_results.append({"text": "?", "success": False, "reason": str(r)})
+            else:
+                commit_results.append(r)
 
         added_count = sum(1 for r in commit_results if r["success"] and not r.get("skipped"))
         skipped_count = sum(1 for r in commit_results if r.get("skipped"))
@@ -689,12 +724,12 @@ async def _run_commit(session: OrderSession):
 
     except Exception as e:
         logger.exception("Error during commit")
-        db.rollback()
         await q.put(("error", str(e)))
     finally:
         await alexa_client.close()
-        await instacart_agent.close()
-        db.close()
+        # Close the pool — commit is the final phase
+        await pool.close()
+        session.browser_pool = None
 
 
 @router.get("/commit-progress/{session_id}")
@@ -766,15 +801,22 @@ async def commit_progress_stream(session_id: str):
                 _, idx, alexa_text, count, total = event
                 script = _row_update_script(idx, "badge-new commit-pulse", "Adding...")
                 pct = int(count / total * 100) if total > 0 else 0
+                active = list(session.active_commits)
                 progress = (
                     f'<div class="progress-container">'
                     f'<div class="progress-bar">'
                     f'<div class="progress-fill" style="width: {pct}%"></div>'
                     f"</div>"
                     f'<p class="progress-text">'
-                    f"Adding item {count + 1} of {total} &mdash; {html_escape(alexa_text)}"
-                    f"</p></div>"
+                    f"Added {count} of {total}"
+                    f"</p>"
                 )
+                if active:
+                    items_str = ", ".join(html_escape(a) for a in active[:4])
+                    if len(active) > 4:
+                        items_str += f" +{len(active) - 4} more"
+                    progress += f'<p class="progress-text">Adding: {items_str}...</p>'
+                progress += "</div>"
                 yield {"event": "progress", "data": progress + script}
 
             elif event_type == "done":

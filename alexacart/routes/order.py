@@ -101,7 +101,6 @@ async def start_order(request: Request):
 
     return HTMLResponse(
         f'<div id="search-progress" '
-        f'hx-ext="sse" '
         f'sse-connect="/order/progress/{session_id}" '
         f'sse-swap="progress" '
         f'sse-close="close" '
@@ -531,15 +530,22 @@ async def commit_order(request: Request):
     asyncio.create_task(_run_commit(session))
 
     return HTMLResponse(
-        f'<div id="commit-progress" '
-        f'hx-ext="sse" '
-        f'sse-connect="/order/commit-progress/{session_id}" '
-        f'sse-swap="progress" '
-        f'sse-close="close" '
-        f'hx-swap="innerHTML">'
+        f'<div id="commit-progress">'
         f'<div class="progress-container">'
         f'<p class="progress-text">Starting...</p>'
         f"</div></div>"
+        f"<script>"
+        f"(function(){{"
+        f'var src=new EventSource("/order/commit-progress/{session_id}");'
+        f'var el=document.getElementById("commit-progress");'
+        f'src.addEventListener("progress",function(e){{'
+        f"el.innerHTML=e.data;"
+        f'el.querySelectorAll("script").forEach(function(s){{eval(s.textContent)}});'
+        f"}});"
+        f'src.addEventListener("close",function(){{src.close()}});'
+        f'src.addEventListener("error",function(){{src.close()}});'
+        f"}})();"
+        f"</script>"
     )
 
 
@@ -579,6 +585,7 @@ async def _run_commit(session: OrderSession):
                 continue
 
             # Signal "active" — this item is being processed now
+            logger.info("Commit: pushing 'active' for idx=%s text=%s", idx, alexa_text)
             await q.put(("active", idx, alexa_text, commit_count, total))
 
             # Find the original proposal
@@ -645,6 +652,7 @@ async def _run_commit(session: OrderSession):
                 "reason": reason,
             })
             commit_count += 1
+            logger.info("Commit: pushing 'done' for idx=%s text=%s added=%s", idx, alexa_text, added)
             await q.put(("done", idx, alexa_text, added, reason, commit_count, total))
 
         db.commit()
@@ -670,11 +678,13 @@ async def commit_progress_stream(session_id: str):
     async def generate():
         session = _sessions.get(session_id)
         if not session or not session.commit_queue:
+            logger.warning("Commit SSE: session %s not found or no queue", session_id)
             yield {"event": "progress", "data": '<div class="status-message status-error">Session not found</div>'}
             yield {"event": "close", "data": ""}
             return
 
         q = session.commit_queue
+        logger.info("Commit SSE: connected for session %s", session_id)
 
         while True:
             try:
@@ -689,6 +699,7 @@ async def commit_progress_stream(session_id: str):
                 return
 
             event_type = event[0]
+            logger.info("Commit SSE: sending event type=%s", event_type)
 
             if event_type == "complete":
                 _, added_count, skipped_count, total_count = event
@@ -722,20 +733,12 @@ async def commit_progress_stream(session_id: str):
 
             if event_type == "skip":
                 _, idx, alexa_text, count, total = event
-                oob = (
-                    f'<div id="status-{idx}" hx-swap-oob="innerHTML">'
-                    f'<span class="badge badge-substituted">&mdash; Skipped</span>'
-                    f"</div>"
-                )
-                yield {"event": "progress", "data": _commit_progress_bar(count, total) + oob}
+                script = _row_update_script(idx, "badge-substituted", "&mdash; Skipped")
+                yield {"event": "progress", "data": _commit_progress_bar(count, total) + script}
 
             elif event_type == "active":
                 _, idx, alexa_text, count, total = event
-                oob = (
-                    f'<div id="status-{idx}" hx-swap-oob="innerHTML">'
-                    f'<span class="badge badge-new commit-pulse">Adding...</span>'
-                    f"</div>"
-                )
+                script = _row_update_script(idx, "badge-new commit-pulse", "Adding...")
                 pct = int(count / total * 100) if total > 0 else 0
                 progress = (
                     f'<div class="progress-container">'
@@ -746,30 +749,34 @@ async def commit_progress_stream(session_id: str):
                     f"Adding item {count + 1} of {total} &mdash; {html_escape(alexa_text)}"
                     f"</p></div>"
                 )
-                yield {"event": "progress", "data": progress + oob}
+                yield {"event": "progress", "data": progress + script}
 
             elif event_type == "done":
                 _, idx, alexa_text, success, reason, count, total = event
                 if success:
-                    badge_class = "badge-matched"
-                    badge_text = "&#10003; Added"
-                    if reason:
-                        badge_text = "&#10003; Added"
-                        extra = f'<span class="muted" style="font-size:0.75rem;display:block">{html_escape(reason)}</span>'
-                    else:
-                        extra = ""
-                else:
-                    badge_class = "badge-error"
-                    badge_text = f"&#10007; {html_escape(reason or 'Failed')}"
+                    badge_html = "&#10003; Added"
                     extra = ""
-                oob = (
-                    f'<div id="status-{idx}" hx-swap-oob="innerHTML">'
-                    f'<span class="badge {badge_class}">{badge_text}</span>{extra}'
-                    f"</div>"
-                )
-                yield {"event": "progress", "data": _commit_progress_bar(count, total) + oob}
+                    if reason:
+                        extra = f'<span class="muted" style="font-size:0.75rem;display:block">{html_escape(reason)}</span>'
+                    script = _row_update_script(idx, "badge-matched", badge_html, extra)
+                else:
+                    badge_html = f"&#10007; {html_escape(reason or 'Failed')}"
+                    script = _row_update_script(idx, "badge-error", badge_html)
+                yield {"event": "progress", "data": _commit_progress_bar(count, total) + script}
 
     return EventSourceResponse(generate())
+
+
+def _row_update_script(idx: int, badge_class: str, badge_html: str, extra: str = "") -> str:
+    """Return a <script> tag that updates a row's status badge via JS."""
+    return (
+        f'<script>'
+        f'(function(){{'
+        f'var el=document.getElementById("status-{idx}");'
+        f'if(el)el.innerHTML=\'<span class="badge {badge_class}">{badge_html}</span>{extra}\';'
+        f'}})();'
+        f'</script>'
+    )
 
 
 def _commit_progress_bar(count: int, total: int) -> str:
@@ -802,26 +809,8 @@ def _learn_from_result(
             # User changed the proposal — make their choice the top preference
             make_product_top_choice(db, grocery_item_id, final_product, product_url=product_url, brand=brand, image_url=image_url)
         else:
-            # User accepted — ensure product is in preferences
-            from alexacart.models import PreferredProduct
-
-            existing = (
-                db.query(PreferredProduct)
-                .filter(
-                    PreferredProduct.grocery_item_id == grocery_item_id,
-                    PreferredProduct.product_name == final_product,
-                )
-                .first()
-            )
-            if existing:
-                # Update URL/image if we now have one
-                if product_url and not existing.product_url:
-                    existing.product_url = product_url
-                if image_url and not existing.image_url:
-                    existing.image_url = image_url
-                db.flush()
-            else:
-                add_preferred_product(db, grocery_item_id, final_product, product_url=product_url, brand=brand, image_url=image_url)
+            # User accepted — ensure product is in preferences (dedup by URL then name)
+            add_preferred_product(db, grocery_item_id, final_product, product_url=product_url, brand=brand, image_url=image_url)
     else:
         # Unknown item — create new grocery item + alias + preferred product
         item = create_grocery_item(db, alexa_text)

@@ -536,6 +536,9 @@ async def commit_order(request: Request):
         f"</div></div>"
         f"<script>"
         f"(function(){{"
+        f'var form=document.getElementById("review-form");'
+        f'if(form)form.querySelectorAll("input,button,details").forEach(function(x){{x.disabled=true}});'
+        f'if(form)form.querySelectorAll(".skip-option,.custom-url-section").forEach(function(x){{x.style.display="none"}});'
         f'var src=new EventSource("/order/commit-progress/{session_id}");'
         f'var el=document.getElementById("commit-progress");'
         f'src.addEventListener("progress",function(e){{'

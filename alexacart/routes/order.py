@@ -691,7 +691,7 @@ async def commit_progress_stream(session_id: str):
 
         while True:
             try:
-                event = await asyncio.wait_for(q.get(), timeout=120)
+                event = await asyncio.wait_for(q.get(), timeout=600)
             except asyncio.TimeoutError:
                 yield {
                     "event": "progress",

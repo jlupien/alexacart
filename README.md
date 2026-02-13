@@ -43,6 +43,7 @@ DATA_DIR=
 BROWSER_USE_API_KEY=your-api-key-here
 ALEXA_LIST_NAME=Grocery List
 INSTACART_STORE=Wegmans
+SEARCH_CONCURRENCY=4
 ```
 
 | Variable | Description | Default |
@@ -51,6 +52,7 @@ INSTACART_STORE=Wegmans
 | `BROWSER_USE_API_KEY` | API key from [browser-use](https://browser-use.com) | (required) |
 | `ALEXA_LIST_NAME` | Name of your Alexa shopping list | `Grocery List` |
 | `INSTACART_STORE` | Instacart store to search | `Wegmans` |
+| `SEARCH_CONCURRENCY` | Number of parallel browser agents for searching Instacart | `4` |
 
 ### Run
 

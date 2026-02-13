@@ -38,21 +38,26 @@ class ProductResult:
 
 
 class InstacartAgent:
-    def __init__(self):
+    def __init__(self, profile_suffix: str | None = None, headless: bool = False):
         self._session = None
+        self._profile_suffix = profile_suffix
+        self._headless = headless
 
     async def _get_session(self):
         if self._session is None:
             from browser_use import BrowserSession
 
-            profile_dir = settings.resolved_data_dir / "browser-profile"
+            if self._profile_suffix:
+                profile_dir = settings.resolved_data_dir / f"browser-profile-{self._profile_suffix}"
+            else:
+                profile_dir = settings.resolved_data_dir / "browser-profile"
             profile_dir.mkdir(parents=True, exist_ok=True)
 
             # Clean up stale Chrome lock file if no Chrome process is using the profile
             self._cleanup_stale_lock(profile_dir)
 
             self._session = BrowserSession(
-                headless=False,
+                headless=self._headless,
                 user_data_dir=str(profile_dir),
                 keep_alive=True,
             )
@@ -79,6 +84,61 @@ class InstacartAgent:
                 lock_file.unlink(missing_ok=True)
         except Exception as e:
             logger.debug("Could not check for stale lock: %s", e)
+
+    async def extract_all_cookies(self) -> list[dict]:
+        """Extract all browser cookies via CDP (for sharing with worker sessions)."""
+        session = await self._get_session()
+        return await session._cdp_get_cookies()
+
+    async def inject_cookies(self, cookies: list[dict]) -> None:
+        """Inject cookies into this browser session via CDP."""
+        session = await self._get_session()
+        # Ensure browser is started
+        try:
+            session.cdp_client
+        except (AssertionError, AttributeError):
+            await session.start()
+
+        # Navigate to Instacart so cookie domain context is established
+        await session.navigate_to(f"{INSTACART_BASE}")
+        await asyncio.sleep(1)
+
+        cdp_session = await session.get_or_create_cdp_session(target_id=None)
+        # Filter to Instacart-related cookies
+        ic_cookies = [c for c in cookies if "instacart" in c.get("domain", "")]
+        if ic_cookies:
+            await cdp_session.cdp_client.send.Network.setCookies(
+                params={"cookies": ic_cookies},
+                session_id=cdp_session.session_id,
+            )
+        logger.info("Injected %d Instacart cookies into worker session", len(ic_cookies))
+
+    async def create_search_pool(self, count: int) -> list["InstacartAgent"]:
+        """
+        Create a pool of headless worker agents with cookies from this (main) agent.
+        Workers share the same Instacart auth but use separate browser instances.
+        """
+        cookies = await self.extract_all_cookies()
+        workers = []
+
+        async def _start_worker(i: int) -> "InstacartAgent":
+            worker = InstacartAgent(profile_suffix=f"search-worker-{i}", headless=True)
+            await worker.inject_cookies(cookies)
+            return worker
+
+        # Start all workers in parallel
+        results = await asyncio.gather(
+            *[_start_worker(i) for i in range(count)],
+            return_exceptions=True,
+        )
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.warning("Failed to start search worker %d: %s", i, result)
+            else:
+                workers.append(result)
+
+        logger.info("Created %d search workers (requested %d)", len(workers), count)
+        return workers
 
     async def _run_agent(self, task: str, max_actions_per_step: int = 5, max_steps: int = 8):
         """Create and run a browser-use agent with standard settings."""

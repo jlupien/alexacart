@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     alexa_list_name: str = "Grocery List"
     browser_use_api_key: str = ""
     instacart_store: str = "Wegmans"
+    search_concurrency: int = 4
     data_dir: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}

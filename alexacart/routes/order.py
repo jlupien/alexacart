@@ -78,6 +78,7 @@ class OrderSession:
     searched_count: int = 0
     status: str = "starting"  # starting, searching, ready, committing, done
     error: str | None = None
+    active_searches: set = field(default_factory=set)
     # Commit state (queue-based for reliable SSE delivery)
     commit_queue: asyncio.Queue | None = None
     commit_items_data: dict = field(default_factory=dict)
@@ -225,61 +226,102 @@ async def _apply_search_results(
         proposal.status_class = "error"
 
 
-async def _search_items(session: OrderSession, agent):
-    """Search Instacart for each item in the session."""
+async def _search_single_item(
+    session: OrderSession, proposal: ProposalItem, agent_pool: asyncio.Queue
+):
+    """Search Instacart for a single item using a worker from the pool."""
+    worker = await agent_pool.get()
     db = SessionLocal()
 
+    session.active_searches.add(proposal.alexa_text)
     try:
-        session.status = "searching"
+        match = find_match(db, proposal.alexa_text)
+        proposal.grocery_item_id = match.grocery_item_id
+        proposal.grocery_item_name = match.grocery_item_name
 
-        for proposal in session.proposals:
-            try:
-                match = find_match(db, proposal.alexa_text)
-                proposal.grocery_item_id = match.grocery_item_id
-                proposal.grocery_item_name = match.grocery_item_name
-
-                if match.is_known and match.preferred_products:
-                    # Try preferred products in rank order
-                    found = False
-                    for pref in match.preferred_products:
-                        # Use direct URL if available, fall back to search
-                        if pref.product_url:
-                            result = await agent.check_product_by_url(pref.product_url)
-                        else:
-                            results = await agent.search_product(pref.product_name)
-                            result = results[0] if results else None
-                        if result and result.in_stock:
-                            proposal.product_name = result.product_name
-                            proposal.product_url = result.product_url or pref.product_url
-                            proposal.brand = result.brand or pref.brand
-                            proposal.price = result.price
-                            proposal.image_url = result.image_url or pref.image_url
-                            proposal.status = f"Matched (choice #{pref.rank})"
-                            proposal.status_class = "matched"
-                            proposal.in_stock = True
-                            found = True
-
-                            # Update last_seen_in_stock
-                            pref.last_seen_in_stock = datetime.now(UTC)
-                            db.commit()
-                            break
-
-                    if not found:
-                        await _apply_search_results(
-                            proposal, agent, proposal.alexa_text,
-                            "Substituted (usual out of stock)", "substituted",
-                        )
+        if match.is_known and match.preferred_products:
+            # Try preferred products in rank order
+            found = False
+            for pref in match.preferred_products:
+                if pref.product_url:
+                    result = await worker.check_product_by_url(pref.product_url)
                 else:
-                    await _apply_search_results(
-                        proposal, agent, proposal.alexa_text, "New item", "new",
-                    )
+                    results = await worker.search_product(pref.product_name)
+                    result = results[0] if results else None
+                if result and result.in_stock:
+                    proposal.product_name = result.product_name
+                    proposal.product_url = result.product_url or pref.product_url
+                    proposal.brand = result.brand or pref.brand
+                    proposal.price = result.price
+                    proposal.image_url = result.image_url or pref.image_url
+                    proposal.status = f"Matched (choice #{pref.rank})"
+                    proposal.status_class = "matched"
+                    proposal.in_stock = True
+                    found = True
 
+                    pref.last_seen_in_stock = datetime.now(UTC)
+                    db.commit()
+                    break
+
+            if not found:
+                await _apply_search_results(
+                    proposal, worker, proposal.alexa_text,
+                    "Substituted (usual out of stock)", "substituted",
+                )
+        else:
+            await _apply_search_results(
+                proposal, worker, proposal.alexa_text, "New item", "new",
+            )
+
+    except Exception as e:
+        logger.error("Search failed for '%s': %s", proposal.alexa_text, e)
+        proposal.status = f"Error: {e}"
+        proposal.status_class = "error"
+    finally:
+        session.active_searches.discard(proposal.alexa_text)
+        session.searched_count += 1
+        db.close()
+        agent_pool.put_nowait(worker)
+
+
+async def _search_items(session: OrderSession, agent):
+    """Search Instacart for each item in the session — in parallel."""
+    from alexacart.config import settings
+
+    session.status = "searching"
+    concurrency = settings.search_concurrency
+    workers = []
+
+    try:
+        # Create headless worker pool (main agent + N-1 workers)
+        if concurrency > 1:
+            try:
+                workers = await agent.create_search_pool(concurrency - 1)
             except Exception as e:
-                logger.error("Search failed for '%s': %s", proposal.alexa_text, e)
-                proposal.status = f"Error: {e}"
-                proposal.status_class = "error"
+                logger.warning("Failed to create search worker pool: %s", e)
 
-            session.searched_count += 1
+        all_agents = [agent] + workers
+        agent_pool: asyncio.Queue = asyncio.Queue()
+        for a in all_agents:
+            agent_pool.put_nowait(a)
+
+        logger.info(
+            "Searching %d items with %d parallel agents",
+            len(session.proposals), agent_pool.qsize(),
+        )
+
+        # Launch all searches concurrently — pool limits actual parallelism
+        results = await asyncio.gather(
+            *[
+                _search_single_item(session, proposal, agent_pool)
+                for proposal in session.proposals
+            ],
+            return_exceptions=True,
+        )
+
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error("Parallel search task %d failed: %s", i, result)
 
         session.status = "ready"
 
@@ -288,7 +330,12 @@ async def _search_items(session: OrderSession, agent):
         session.error = str(e)
         session.status = "ready"
     finally:
-        db.close()
+        # Close worker sessions (not the main agent — caller handles that)
+        for w in workers:
+            try:
+                await w.close()
+            except Exception as e:
+                logger.warning("Error closing search worker: %s", e)
 
 
 @router.get("/progress/{session_id}")
@@ -348,9 +395,7 @@ async def progress_stream(session_id: str):
                 if session.total_items > 0
                 else 0
             )
-            current_item = ""
-            if session.searched_count < len(session.proposals):
-                current_item = session.proposals[session.searched_count].alexa_text
+            active = list(session.active_searches)
 
             html = (
                 f'<div class="progress-container">'
@@ -361,8 +406,11 @@ async def progress_stream(session_id: str):
                 f"Searched {session.searched_count} of {session.total_items} items ({pct}%)"
                 f"</p>"
             )
-            if current_item:
-                html += f'<p class="progress-text">Searching: {html_escape(current_item)}...</p>'
+            if active:
+                items_str = ", ".join(html_escape(a) for a in active[:4])
+                if len(active) > 4:
+                    items_str += f" +{len(active) - 4} more"
+                html += f'<p class="progress-text">Searching: {items_str}...</p>'
             html += "</div>"
 
             yield {"event": "progress", "data": html}

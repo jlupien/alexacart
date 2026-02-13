@@ -174,6 +174,17 @@ class InstacartAgent:
             await session.start()
         return session
 
+    async def _restart_as(self, headless: bool):
+        """Stop current session and restart with a different headless mode."""
+        if self._session:
+            try:
+                await self._session.stop()
+            except Exception as e:
+                logger.warning("Error stopping session for restart: %s", e)
+            self._session = None
+        self._headless = headless
+        await self._ensure_started()
+
     async def _ensure_service_logged_in(
         self,
         service_name: str,
@@ -184,8 +195,9 @@ class InstacartAgent:
     ) -> bool:
         """
         Fast login check via JS (no LLM call).
-        Navigate to check_url, run check_js. If not logged in, navigate to
-        login_url and poll with poll_js every 3s until logged in or timeout.
+        Navigate to check_url, run check_js. If not logged in, open a visible
+        browser window for manual login and poll with poll_js every 3s.
+        Returns to headless after login completes.
         """
         session = await self._ensure_started()
 
@@ -202,23 +214,38 @@ class InstacartAgent:
             logger.info("Already logged into %s (fast check)", service_name)
             return True
 
-        # Not logged in — navigate to login page directly
+        # Not logged in — show a visible browser for manual login
+        showed_browser = False
+        if self._headless:
+            logger.info("Login needed for %s — opening visible browser", service_name)
+            await self._restart_as(headless=False)
+            showed_browser = True
+
+        session = await self._get_session()
         logger.info("Not logged into %s — navigating to login page...", service_name)
         await session.navigate_to(login_url)
 
         # Poll with JS every 3s (much faster than LLM-based polling)
+        logged_in = False
         for _ in range(200):  # Up to ~10 minutes
             await asyncio.sleep(3)
             try:
                 poll_result = await self._run_js(poll_js)
                 if "LOGGED_IN" in poll_result.upper() and "NEEDS_LOGIN" not in poll_result.upper():
                     logger.info("User logged into %s successfully", service_name)
-                    return True
+                    logged_in = True
+                    break
             except Exception:
                 logger.debug("Poll attempt for %s login failed", service_name)
 
-        logger.error("Timed out waiting for %s login", service_name)
-        return False
+        if not logged_in:
+            logger.error("Timed out waiting for %s login", service_name)
+
+        # Return to headless now that login is done (or timed out)
+        if showed_browser:
+            await self._restart_as(headless=True)
+
+        return logged_in
 
     async def ensure_logged_in(self) -> bool:
         """Check if logged into Instacart via fast JS check."""
@@ -740,11 +767,11 @@ class BrowserPool:
         if settings.debug_clear_instacart_cookies:
             self._clear_profile_cookies(settings.resolved_data_dir / "browser-profile")
 
-        # Create the two auth agents (visible)
+        # Create the two auth agents (headless — a visible window only opens if login is needed)
         # pool-0 (Amazon auth) gets its own profile for Amazon cookies
         # pool-1 (Instacart auth) uses the default profile to preserve existing cookies
-        amazon_agent = InstacartAgent(profile_suffix="pool-0", headless=False)
-        instacart_agent = InstacartAgent(headless=False)
+        amazon_agent = InstacartAgent(profile_suffix="pool-0", headless=True)
+        instacart_agent = InstacartAgent(headless=True)
         self._agents = [amazon_agent, instacart_agent]
 
         # Start headless workers in background

@@ -202,11 +202,18 @@ def promote_product(db: Session, product_id: int) -> None:
     )
 
     if above:
-        above.rank, product.rank = product.rank, above.rank
+        # Use a temporary rank to avoid UNIQUE constraint violation during swap
+        old_rank = product.rank
+        new_rank = above.rank
+        above.rank = -1
+        db.flush()
+        product.rank = new_rank
+        db.flush()
+        above.rank = old_rank
+        db.flush()
     else:
         product.rank -= 1
-
-    db.flush()
+        db.flush()
 
 
 def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str, product_url: str | None = None, brand: str | None = None, image_url: str | None = None) -> PreferredProduct:

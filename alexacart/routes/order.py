@@ -131,7 +131,7 @@ async def _run_order(session: OrderSession):
             session.status = "error"
             return
 
-        # Step 2: Extract fresh Amazon cookies from the browser and save them
+        # Step 2: Extract fresh Amazon/Alexa cookies from the browser and save them
         session.status = "fetching_list"
         cookie_data = await agent.get_amazon_cookies()
         if not cookie_data.get("cookies"):
@@ -148,13 +148,41 @@ async def _run_order(session: OrderSession):
             await alexa_client.close()
             error_str = str(e)
             if "401" in error_str:
-                session.error = "Amazon session expired. Please restart the app and log in again."
+                # First attempt failed — cookies may be stale. Re-extract and retry once.
+                logger.info("Alexa API returned 401, re-extracting cookies and retrying...")
+                cookie_data = await agent.get_amazon_cookies()
+                if cookie_data.get("cookies"):
+                    save_cookies(cookie_data)
+                    alexa_client = AlexaClient()
+                    try:
+                        items = await alexa_client.get_items()
+                    except Exception as retry_e:
+                        await alexa_client.close()
+                        retry_str = str(retry_e)
+                        if "401" in retry_str:
+                            session.error = (
+                                "Alexa session cookies expired. "
+                                "Try visiting alexa.amazon.com in Chrome, then restart the order."
+                            )
+                        else:
+                            session.error = f"Failed to fetch Alexa list: {retry_str}"
+                        session.status = "error"
+                        return
+                else:
+                    session.error = (
+                        "Alexa session cookies expired and could not be refreshed. "
+                        "Try visiting alexa.amazon.com in Chrome, then restart the order."
+                    )
+                    session.status = "error"
+                    return
             elif "503" in error_str or "502" in error_str:
                 session.error = "Amazon servers are temporarily unavailable. Please try again in a minute."
+                session.status = "error"
+                return
             else:
                 session.error = f"Failed to fetch Alexa list: {error_str}"
-            session.status = "error"
-            return
+                session.status = "error"
+                return
         finally:
             await alexa_client.close()
 
@@ -305,6 +333,8 @@ async def progress_stream(session_id: str):
         session = _sessions.get(session_id)
         if not session:
             yield {"event": "progress", "data": '<div class="status-message status-error">Session not found</div>'}
+            # Keep connection alive so htmx SSE doesn't reconnect in a loop
+            await asyncio.sleep(3600)
             return
 
         while session.status == "logging_in":
@@ -325,6 +355,7 @@ async def progress_stream(session_id: str):
                 "event": "progress",
                 "data": f'<div class="status-message status-error">{session.error}</div>',
             }
+            await asyncio.sleep(3600)
             return
 
         while session.status == "fetching_list":
@@ -343,6 +374,7 @@ async def progress_stream(session_id: str):
                 "event": "progress",
                 "data": f'<div class="status-message status-error">{session.error}</div>',
             }
+            await asyncio.sleep(3600)
             return
 
         while session.status == "searching":
@@ -389,6 +421,9 @@ async def progress_stream(session_id: str):
                     f'<script>window.location.href="/order/review/{session_id}";</script>'
                 ),
             }
+
+        # Keep connection alive so htmx SSE doesn't reconnect in a loop
+        await asyncio.sleep(3600)
 
     return EventSourceResponse(generate())
 
@@ -457,20 +492,11 @@ async def fetch_product_url(request: Request, url: str = Form(...), index: int =
     try:
         result = await agent.check_product_by_url(url)
         if result:
-            img_html = ""
-            if result.image_url:
-                img_html = f'<img src="{result.image_url}" alt="" class="product-thumb" style="vertical-align:middle;margin-right:0.5rem;">'
             return HTMLResponse(
-                f'<div class="status-message status-success" style="margin-top:0.5rem">'
-                f'{img_html}'
-                f'Found: <strong>{result.product_name}</strong>'
-                f'{" — " + result.brand if result.brand else ""}'
-                f'{" — " + result.price if result.price else ""}'
-                f'</div>'
                 f'<script>'
                 f'selectProduct({index}, {json.dumps(result.product_name)}, '
                 f'{json.dumps(result.price or "")}, {json.dumps(result.image_url or "")}, '
-                f'{json.dumps(url)})'
+                f'{json.dumps(url)}, {json.dumps(result.brand or "")})'
                 f'</script>'
             )
         return HTMLResponse(
@@ -526,6 +552,10 @@ async def commit_order(request: Request):
             alexa_text = data.get("alexa_text", "")
             grocery_item_id = data.get("grocery_item_id", "")
             alexa_item_id = data.get("alexa_item_id", "")
+
+            if data.get("skip") == "1":
+                results.append({"text": alexa_text, "success": True, "reason": "Skipped", "skipped": True})
+                continue
 
             if not product_name:
                 results.append({"text": alexa_text, "success": False, "reason": "No product selected"})
@@ -608,12 +638,23 @@ async def commit_order(request: Request):
         '<script>document.getElementById("review-form").style.display="none";</script>'
         '<div class="results-summary card"><h3>Order Complete</h3>'
     )
-    success_count = sum(1 for r in results if r["success"])
-    html += f'<p class="muted" style="margin-bottom:1rem">{success_count} of {len(results)} items added to cart</p>'
+    added_count = sum(1 for r in results if r["success"] and not r.get("skipped"))
+    skipped_count = sum(1 for r in results if r.get("skipped"))
+    summary = f'{added_count} of {len(results)} items added to cart'
+    if skipped_count:
+        summary += f', {skipped_count} skipped'
+    html += f'<p class="muted" style="margin-bottom:1rem">{summary}</p>'
 
     for r in results:
-        icon = "&#10003;" if r["success"] else "&#10007;"
-        cls = "status-success" if r["success"] else "status-error"
+        if r.get("skipped"):
+            icon = "&#8212;"  # em dash
+            cls = "status-warning"
+        elif r["success"]:
+            icon = "&#10003;"
+            cls = "status-success"
+        else:
+            icon = "&#10007;"
+            cls = "status-error"
         html += (
             f'<div class="result-item">'
             f'<span class="result-icon {cls}">{icon}</span>'

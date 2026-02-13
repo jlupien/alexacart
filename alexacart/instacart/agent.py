@@ -236,8 +236,12 @@ class InstacartAgent:
     async def get_amazon_cookies(self) -> dict:
         """
         Extract Amazon cookies from the persistent browser session.
+        Navigates to alexa.amazon.com first to establish Alexa session cookies
+        (csrf token, etc.) which are separate from www.amazon.com cookies.
         Returns cookie data in the format expected by AlexaClient.
         """
+        import asyncio
+
         session = await self._get_session()
 
         # Ensure browser is initialized (agent.run() should have started it already)
@@ -245,6 +249,15 @@ class InstacartAgent:
             session.cdp_client  # property raises if not connected
         except (AssertionError, AttributeError):
             await session.start()
+
+        # Visit alexa.amazon.com to establish Alexa session cookies (csrf, etc.)
+        # These are on a different domain than www.amazon.com and won't exist
+        # unless the browser actually visits the Alexa subdomain.
+        try:
+            await session.navigate_to("https://alexa.amazon.com/spa/index.html")
+            await asyncio.sleep(3)  # Give it time to set session cookies
+        except Exception as e:
+            logger.warning("Failed to navigate to alexa.amazon.com: %s", e)
 
         all_cookies = await session._cdp_get_cookies()
         cookies = {}
@@ -421,19 +434,37 @@ class InstacartAgent:
                 params={
                     "expression": """
                         (function() {
-                            // Product detail pages have a main product image
-                            // Try common selectors for the hero/main product image
-                            var img = document.querySelector('img[srcset][loading="eager"]')
-                                   || document.querySelector('[data-testid="product-image"] img')
-                                   || document.querySelector('.e-1alkbr1 img');
-                            if (img) return img.src || img.getAttribute('src') || '';
-                            // Fallback: largest image on the page that looks like a product
-                            var imgs = Array.from(document.querySelectorAll('img[src*="instacart"]'));
-                            if (imgs.length) {
-                                imgs.sort(function(a, b) {
-                                    return (b.naturalWidth * b.naturalHeight) - (a.naturalWidth * a.naturalHeight);
+                            // Strategy 1: find product images by CDN URL patterns
+                            // Instacart product images are hosted on their image CDN
+                            var candidates = Array.from(document.querySelectorAll('img'))
+                                .filter(function(img) {
+                                    var src = img.src || '';
+                                    // Match Instacart CDN image URLs (product photos)
+                                    return (src.indexOf('instacartassets') !== -1
+                                         || src.indexOf('product-image') !== -1
+                                         || src.indexOf('/image-server/') !== -1)
+                                        && img.naturalWidth > 50
+                                        && img.naturalHeight > 50;
                                 });
-                                return imgs[0].src || '';
+                            if (candidates.length) {
+                                // Pick the largest one (likely the hero image)
+                                candidates.sort(function(a, b) {
+                                    return (b.naturalWidth * b.naturalHeight)
+                                         - (a.naturalWidth * a.naturalHeight);
+                                });
+                                return candidates[0].src;
+                            }
+                            // Strategy 2: any large image that isn't a logo/icon
+                            var all = Array.from(document.querySelectorAll('img'))
+                                .filter(function(img) {
+                                    return img.naturalWidth >= 100 && img.naturalHeight >= 100;
+                                });
+                            if (all.length) {
+                                all.sort(function(a, b) {
+                                    return (b.naturalWidth * b.naturalHeight)
+                                         - (a.naturalWidth * a.naturalHeight);
+                                });
+                                return all[0].src;
                             }
                             return '';
                         })()

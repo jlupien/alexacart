@@ -7,9 +7,10 @@
         <input type="hidden" name="items[{{ item.index }}][image_url]" value="{{ item.image_url or '' }}" class="hidden-image-url">
         <input type="hidden" name="items[{{ item.index }}][grocery_item_id]" value="{{ item.grocery_item_id or '' }}">
         <input type="hidden" name="items[{{ item.index }}][alexa_item_id]" value="{{ item.alexa_item_id or '' }}">
+        <input type="hidden" name="items[{{ item.index }}][skip]" value="" class="hidden-skip">
 
         {% if item.alternatives %}
-        {# Show structured radio options #}
+        {# Multiple search results — radio for each #}
         <div class="product-options">
             {% for alt in item.alternatives %}
             <label class="product-option {% if loop.first %}selected{% endif %}">
@@ -35,50 +36,76 @@
                 </span>
             </label>
             {% endfor %}
+            <label class="product-option skip-option">
+                <input
+                    type="radio"
+                    name="items[{{ item.index }}][selected]"
+                    value="skip"
+                    onchange="toggleSkip({{ item.index }}, true)"
+                >
+                <span class="option-details"><strong>Skip this item</strong><span class="brand">Handle manually / buy separately</span></span>
+            </label>
         </div>
+        {% elif item.product_name %}
+        {# Matched item — single product as radio #}
+        <div class="product-options">
+            <label class="product-option selected">
+                <input
+                    type="radio"
+                    name="items[{{ item.index }}][selected]"
+                    value="0"
+                    checked
+                    onchange="selectAlternative({{ item.index }}, this)"
+                    data-product-name="{{ item.product_name }}"
+                    data-product-url="{{ item.product_url or '' }}"
+                    data-brand="{{ item.brand or '' }}"
+                    data-price="{{ item.price or '' }}"
+                    data-image-url="{{ item.image_url or '' }}"
+                >
+                {% if item.image_url %}<img src="{{ item.image_url }}" alt="" class="option-thumb">{% endif %}
+                <span class="option-details">
+                    <strong>{{ item.product_name }}</strong>
+                    {% if item.brand %}<span class="brand">{{ item.brand }}</span>{% endif %}
+                    {% if item.price %}<span class="price">{{ item.price }}</span>{% endif %}
+                    {% if item.product_url %}<a href="{{ item.product_url }}" target="_blank" class="product-link" onclick="event.stopPropagation()">view</a>{% endif %}
+                </span>
+            </label>
+            <label class="product-option skip-option">
+                <input
+                    type="radio"
+                    name="items[{{ item.index }}][selected]"
+                    value="skip"
+                    onchange="toggleSkip({{ item.index }}, true)"
+                >
+                <span class="option-details"><strong>Skip this item</strong><span class="brand">Handle manually / buy separately</span></span>
+            </label>
+        </div>
+        {% else %}
+        {# No match — URL input + skip #}
+        <span class="muted">No match found</span>
+        <div class="product-options" style="margin-top: 0.375rem;">
+            <label class="product-option skip-option">
+                <input
+                    type="radio"
+                    name="items[{{ item.index }}][selected]"
+                    value="skip"
+                    onchange="toggleSkip({{ item.index }}, true)"
+                >
+                <span class="option-details"><strong>Skip this item</strong><span class="brand">Handle manually / buy separately</span></span>
+            </label>
+        </div>
+        {% endif %}
         <div class="custom-url-section">
             <details>
                 <summary class="btn btn-xs btn-outline">Use custom URL</summary>
                 <div class="inline-form">
-                    <input type="url" name="url" placeholder="Paste Instacart product URL..." style="flex:1" class="custom-url-val-{{ item.index }}">
-                    <button type="button" class="btn btn-sm btn-primary"
-                            hx-post="/order/fetch-url"
-                            hx-target="#custom-result-{{ item.index }}"
-                            hx-swap="innerHTML"
-                            hx-include=".custom-url-val-{{ item.index }}"
-                            hx-vals='{"index": "{{ item.index }}"}'
-                            >Fetch</button>
+                    <input type="url" placeholder="Paste Instacart product URL..." style="flex:1" class="custom-url-val-{{ item.index }}">
+                    <button type="button" class="btn btn-sm btn-primary" onclick="fetchProductUrl({{ item.index }})">Fetch</button>
+                    <span id="url-spinner-{{ item.index }}" class="htmx-indicator">Loading...</span>
                 </div>
                 <div id="custom-result-{{ item.index }}"></div>
             </details>
         </div>
-        {% elif item.product_name %}
-        {# Matched item — single product #}
-        <div class="matched-product">
-            {% if item.image_url %}<img src="{{ item.image_url }}" alt="" class="option-thumb">{% endif %}
-            <div>
-                <strong>{{ item.product_name }}</strong>
-                {% if item.brand %}<span class="brand">{{ item.brand }}</span>{% endif %}
-                {% if item.price %}<span class="price">{{ item.price }}</span>{% endif %}
-                {% if item.product_url %}<a href="{{ item.product_url }}" target="_blank" class="product-link">view</a>{% endif %}
-            </div>
-        </div>
-        {% else %}
-        <span class="muted">No match found</span>
-        <div class="custom-url-section">
-            <div class="inline-form">
-                <input type="url" name="url" placeholder="Paste Instacart product URL..." style="flex:1" class="custom-url-val-{{ item.index }}">
-                <button type="button" class="btn btn-sm btn-primary"
-                        hx-post="/order/fetch-url"
-                        hx-target="#custom-result-{{ item.index }}"
-                        hx-swap="innerHTML"
-                        hx-include=".custom-url-val-{{ item.index }}"
-                        hx-vals='{"index": "{{ item.index }}"}'
-                        >Fetch</button>
-            </div>
-            <div id="custom-result-{{ item.index }}"></div>
-        </div>
-        {% endif %}
     </td>
     <td class="status">
         <span class="badge badge-{{ item.status_class }}">{{ item.status }}</span>

@@ -30,8 +30,9 @@ from alexacart.matching.matcher import (
     create_grocery_item,
     find_match,
     make_product_top_choice,
+    normalize_text,
 )
-from alexacart.models import OrderLog
+from alexacart.models import Alias, OrderLog
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ class ProposalItem:
     status_class: str = "new"  # matched, substituted, new, error
     in_stock: bool = True
     alternatives: list[ProductOption] = field(default_factory=list)
+    extra_alexa_items: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -181,17 +183,38 @@ async def _run_order(session: OrderSession):
             session.status = "error"
             return
 
-        session.total_items = len(items)
-        for i, item in enumerate(items):
+        # Deduplicate items: group by grocery_item_id (known) or normalized text (unknown)
+        db = SessionLocal()
+        try:
+            groups: dict[str | int, list] = {}
+            for item in items:
+                normalized = normalize_text(item.text)
+                alias = db.query(Alias).filter(Alias.alias == normalized).first()
+                if alias:
+                    key = alias.grocery_item_id
+                else:
+                    key = f"_unknown:{normalized}"
+                groups.setdefault(key, []).append(item)
+        finally:
+            db.close()
+
+        for i, group_items in enumerate(groups.values()):
+            primary = group_items[0]
+            extras = group_items[1:]
             session.proposals.append(
                 ProposalItem(
                     index=i,
-                    alexa_text=item.text,
-                    alexa_item_id=item.item_id,
-                    alexa_list_id=item.list_id,
-                    alexa_item_version=item.version,
+                    alexa_text=primary.text,
+                    alexa_item_id=primary.item_id,
+                    alexa_list_id=primary.list_id,
+                    alexa_item_version=primary.version,
+                    extra_alexa_items=[
+                        {"item_id": e.item_id, "text": e.text, "list_id": e.list_id, "version": e.version}
+                        for e in extras
+                    ],
                 )
             )
+        session.total_items = len(session.proposals)
 
         # Step 4: Search Instacart for each item (pool is already running)
         await _search_items(session, pool)
@@ -616,6 +639,19 @@ async def _commit_single_item(
             checked_off = await alexa_client.mark_complete(alexa_item)
             if not checked_off:
                 logger.warning("Could not check off '%s' on Alexa list", alexa_text)
+            # Check off any grouped duplicate items
+            extra_items_json = data.get("extra_alexa_items", "")
+            if extra_items_json:
+                for extra in json.loads(extra_items_json):
+                    extra_item = AlexaListItem(
+                        item_id=extra["item_id"],
+                        text=extra["text"],
+                        list_id=extra["list_id"],
+                        version=extra["version"],
+                    )
+                    extra_ok = await alexa_client.mark_complete(extra_item)
+                    if not extra_ok:
+                        logger.warning("Could not check off duplicate '%s' on Alexa list", extra["text"])
         elif settings.skip_alexa_checkoff:
             logger.info("Skipping Alexa check-off for '%s' (SKIP_ALEXA_CHECKOFF=true)", alexa_text)
 

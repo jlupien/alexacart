@@ -16,7 +16,7 @@ Automate your grocery ordering: read your Alexa shopping list, match items to In
 ### Prerequisites
 
 - Python 3.11+
-- [uv](https://docs.astral.sh/uv/) package manager
+- [uv](https://docs.astral.sh/uv/) package manager (`brew install uv`)
 - A [browser-use](https://browser-use.com) API key (for `bu-2-0` model)
 
 ### Install
@@ -43,7 +43,7 @@ DATA_DIR=
 BROWSER_USE_API_KEY=your-api-key-here
 ALEXA_LIST_NAME=Grocery List
 INSTACART_STORE=Wegmans
-SEARCH_CONCURRENCY=4
+SEARCH_CONCURRENCY=8
 ```
 
 | Variable | Description | Default |

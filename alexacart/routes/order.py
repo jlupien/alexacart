@@ -535,9 +535,7 @@ async def progress_stream(session_id: str):
                     f"</p>"
                 )
             if active:
-                items_str = ", ".join(html_escape(a) for a in active[:4])
-                if len(active) > 4:
-                    items_str += f" +{len(active) - 4} more"
+                items_str = ", ".join(html_escape(a) for a in active)
                 html += f'<p class="progress-text">Searching: {items_str}...</p>'
             html += "</div>"
 

@@ -66,7 +66,8 @@ _JS_EXTRACT_PRODUCT = """
         if (pm) { price = pm[0]; break; }
     }
 
-    // Stock status: look for "Add to cart" button or out-of-stock text
+    // Stock status: in-stock only if an "Add to cart" button (or "N in cart") exists.
+    // If no such button is found, assume out of stock — don't guess.
     var in_stock = false;
     var btns = document.querySelectorAll('button, [role="button"]');
     for (var i = 0; i < btns.length; i++) {
@@ -75,11 +76,6 @@ _JS_EXTRACT_PRODUCT = """
             in_stock = true;
             break;
         }
-    }
-    if (!in_stock) {
-        // Check if "out of stock" is mentioned
-        var oos = /out of stock|unavailable|sold out/i.test(bodyText.slice(0, 3000));
-        in_stock = !oos;
     }
 
     // Product image: CDN images (same logic as _extract_product_page_image)

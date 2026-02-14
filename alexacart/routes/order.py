@@ -616,6 +616,24 @@ async def _commit_single_item(
     alexa_item_id = data.get("alexa_item_id", "")
 
     if data.get("skip") == "1":
+        db = SessionLocal()
+        try:
+            proposal = None
+            for p in session.proposals:
+                if p.index == idx:
+                    proposal = p
+                    break
+            log_entry = OrderLog(
+                session_id=session.session_id,
+                alexa_text=alexa_text,
+                matched_grocery_item_id=int(grocery_item_id) if grocery_item_id else None,
+                proposed_product=proposal.product_name if proposal else None,
+                skipped=True,
+            )
+            db.add(log_entry)
+            db.commit()
+        finally:
+            db.close()
         await q.put(("skip", idx, alexa_text, commit_counter[0], total))
         return {"text": alexa_text, "success": True, "reason": "Skipped", "skipped": True}
 

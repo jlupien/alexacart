@@ -66,4 +66,5 @@ class OrderLog(Base):
     final_product: Mapped[str | None] = mapped_column(Text, nullable=True)
     was_corrected: Mapped[bool] = mapped_column(Boolean, default=False)
     added_to_cart: Mapped[bool] = mapped_column(Boolean, default=False)
+    skipped: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))

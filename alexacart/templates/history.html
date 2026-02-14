@@ -51,7 +51,9 @@
                 <td class="muted">{{ entry.proposed_product or "—" }}</td>
                 <td>{{ entry.final_product or "—" }}</td>
                 <td>
-                    {% if entry.added_to_cart %}
+                    {% if entry.skipped %}
+                    <span class="badge badge-substituted">Skipped</span>
+                    {% elif entry.added_to_cart %}
                     <span class="badge badge-matched">Added</span>
                     {% else %}
                     <span class="badge badge-error">Failed</span>

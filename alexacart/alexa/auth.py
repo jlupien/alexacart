@@ -93,6 +93,19 @@ def try_refresh_via_sidecar() -> dict | None:
     return None
 
 
+async def _check_amazon_login(page) -> bool:
+    """Check if the current Amazon page shows a logged-in state."""
+    try:
+        el = await page.query_selector("#nav-link-accountList")
+        if el:
+            text = el.text or ""
+            if "sign in" not in text.lower():
+                return True
+    except Exception:
+        pass
+    return False
+
+
 async def extract_cookies_via_nodriver(on_status=None) -> dict:
     """
     Open an undetectable Chrome instance via nodriver, ensure the user is
@@ -137,10 +150,11 @@ async def extract_cookies_via_nodriver(on_status=None) -> dict:
             shutil.rmtree(session_dir, ignore_errors=True)
             logger.info("Cleared session storage: %s", session_dir)
 
-    _status("Opening browser for Amazon login...")
+    # Start headless — only open a visible window if login is actually needed
+    _status("Checking Amazon login...")
     browser = await uc.start(
         user_data_dir=str(profile_dir),
-        headless=False,
+        headless=True,
     )
 
     try:
@@ -148,41 +162,27 @@ async def extract_cookies_via_nodriver(on_status=None) -> dict:
         await page.sleep(2)
 
         # Check if already logged in by looking for the account nav
-        logged_in = False
-        try:
-            el = await page.query_selector("#nav-link-accountList")
-            if el:
-                text = el.text or ""
-                if "sign in" not in text.lower():
-                    logged_in = True
-        except Exception:
-            pass
+        logged_in = await _check_amazon_login(page)
 
         if logged_in:
             _status("Already logged into Amazon")
         else:
+            # Need manual login — restart with a visible browser window
+            browser.stop()
+            _status("Login needed — opening Amazon login window...")
+            browser = await uc.start(
+                user_data_dir=str(profile_dir),
+                headless=False,
+            )
+            page = await browser.get("https://www.amazon.com")
+            await page.sleep(2)
+
             _status("Waiting for Amazon login — please log in via the browser window...")
-            # Poll until logged in (up to 5 minutes)
-            for _ in range(100):
+            for _ in range(100):  # Up to ~5 minutes
                 await page.sleep(3)
-                try:
-                    el = await page.query_selector("#nav-link-accountList")
-                    if el:
-                        text = el.text or ""
-                        if "sign in" not in text.lower():
-                            logged_in = True
-                            break
-                except Exception:
-                    pass
-                # Also check if we're on the main page (redirected after login)
-                try:
-                    if "amazon.com" in page.url and "/ap/" not in page.url:
-                        el = await page.query_selector("#nav-link-accountList")
-                        if el and "sign in" not in (el.text or "").lower():
-                            logged_in = True
-                            break
-                except Exception:
-                    pass
+                if await _check_amazon_login(page):
+                    logged_in = True
+                    break
 
             if not logged_in:
                 raise RuntimeError("Timed out waiting for Amazon login")

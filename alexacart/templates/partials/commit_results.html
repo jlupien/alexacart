@@ -21,7 +21,8 @@
         </span>
     </div>
     {% endfor %}
-    <div style="margin-top: 1.5rem;">
-        <a href="/order/" class="btn btn-primary">Start New Order</a>
+    <div style="margin-top: 1.5rem; display: flex; gap: 0.75rem; justify-content: center;">
+        <a href="https://www.instacart.com/store/{{ instacart_store | lower }}/storefront" target="_blank" class="btn btn-primary">Review Cart on Instacart</a>
+        <a href="/order/" class="btn btn-outline">Start New Order</a>
     </div>
 </div>

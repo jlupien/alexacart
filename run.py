@@ -1,4 +1,12 @@
+import logging
+
 import uvicorn
+
+logging.basicConfig(
+    format="%(asctime)s %(levelname)-5s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+    level=logging.INFO,
+)
 
 from alexacart.app import create_app
 

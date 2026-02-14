@@ -33,7 +33,9 @@
         </div>
         <a href="/order/" class="btn btn-primary btn-lg">Start New Order</a>
         {% elif auto_count > 0 %}
-        <p class="muted" style="margin-bottom: 0.5rem">{{ auto_count }} item(s) already added during search.</p>
+        <div style="margin-bottom: 0.75rem">
+            <p class="muted">{{ auto_count }} item(s) already added during search.</p>
+        </div>
         <button type="submit" id="commit-btn" class="btn btn-primary btn-lg">Add Remaining to Cart</button>
         {% else %}
         <button type="submit" id="commit-btn" class="btn btn-primary btn-lg">Add All to Cart</button>

@@ -9,6 +9,7 @@ Uses browser-use to:
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from urllib.parse import quote
 
@@ -178,6 +179,45 @@ class InstacartAgent:
         except (AssertionError, AttributeError):
             await session.start()
         return session
+
+    @staticmethod
+    def _extract_store_from_url(url: str) -> str | None:
+        """Extract the store slug from an Instacart URL (retailerSlug param or /store/ path)."""
+        match = re.search(r'[?&]retailerSlug=([^&]+)', url)
+        if match:
+            return match.group(1).lower()
+        match = re.search(r'/store/([^/]+)/', url)
+        if match:
+            return match.group(1).lower()
+        return None
+
+    @staticmethod
+    def _fix_store_in_url(url: str) -> str:
+        """If URL contains a different store than configured, rewrite it."""
+        configured = settings.instacart_store.lower()
+        url_store = InstacartAgent._extract_store_from_url(url)
+        if url_store and url_store != configured:
+            logger.info("Rewriting store in URL: '%s' → '%s'", url_store, configured)
+            url = re.sub(r'([?&]retailerSlug=)[^&]+', rf'\g<1>{configured}', url)
+            url = re.sub(r'/store/[^/]+/', f'/store/{configured}/', url)
+        return url
+
+    async def _verify_store_after_navigation(self, original_url: str) -> bool:
+        """Check the current page URL to verify we're on the configured store."""
+        try:
+            current_url = await self._run_js("window.location.href")
+            page_store = self._extract_store_from_url(current_url)
+            if page_store:
+                configured = settings.instacart_store.lower()
+                if page_store != configured:
+                    logger.warning(
+                        "Wrong store after navigation: expected '%s', page shows '%s' (URL: %s → %s)",
+                        configured, page_store, original_url, current_url,
+                    )
+                    return False
+        except Exception as e:
+            logger.debug("Store verification JS failed (non-critical): %s", e)
+        return True
 
     async def _restart_as(self, headless: bool):
         """Stop current session and restart with a different headless mode."""
@@ -382,6 +422,14 @@ class InstacartAgent:
         if product_url.startswith("/"):
             product_url = INSTACART_BASE + product_url
 
+        product_url = self._fix_store_in_url(product_url)
+
+        session = await self._ensure_started()
+        await session.navigate_to(product_url)
+        await asyncio.sleep(2)
+        if not await self._verify_store_after_navigation(product_url):
+            return None
+
         task = (
             f"Go to {product_url} . "
             f"This is an Instacart product page. "
@@ -476,6 +524,14 @@ class InstacartAgent:
         """
         if product_url.startswith("/"):
             product_url = INSTACART_BASE + product_url
+
+        product_url = self._fix_store_in_url(product_url)
+
+        session = await self._ensure_started()
+        await session.navigate_to(product_url)
+        await asyncio.sleep(2)
+        if not await self._verify_store_after_navigation(product_url):
+            return False
 
         task = (
             f"Go to {product_url} . "
@@ -572,8 +628,6 @@ class InstacartAgent:
 
     def _parse_text_results(self, text: str) -> list[ProductResult]:
         """Parse free-text/markdown agent output into ProductResult objects."""
-        import re
-
         results = []
         if not text.strip() or "NOT FOUND" in text.upper():
             return results

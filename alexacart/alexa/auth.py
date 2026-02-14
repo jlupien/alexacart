@@ -106,6 +106,8 @@ async def extract_cookies_via_nodriver(on_status=None) -> dict:
 
     Returns cookie data dict with 'cookies' key.
     """
+    import shutil
+
     import nodriver as uc
 
     def _status(msg):
@@ -115,6 +117,25 @@ async def extract_cookies_via_nodriver(on_status=None) -> dict:
 
     profile_dir = settings.resolved_data_dir / "nodriver-amazon"
     profile_dir.mkdir(parents=True, exist_ok=True)
+
+    if settings.debug_clear_amazon_cookies:
+        _status("Debug: clearing Amazon cookies...")
+        # Clear saved cookies file
+        cookies_path = _cookies_path()
+        if cookies_path.exists():
+            cookies_path.unlink()
+            logger.info("Cleared cookies file: %s", cookies_path)
+        # Clear Chrome cookie storage in nodriver profile
+        for rel in ("Default/Cookies", "Default/Cookies-journal",
+                     "Default/Network/Cookies", "Default/Network/Cookies-journal"):
+            p = profile_dir / rel
+            if p.exists():
+                p.unlink()
+                logger.info("Cleared: %s", p)
+        session_dir = profile_dir / "Default" / "Session Storage"
+        if session_dir.exists():
+            shutil.rmtree(session_dir, ignore_errors=True)
+            logger.info("Cleared session storage: %s", session_dir)
 
     _status("Opening browser for Amazon login...")
     browser = await uc.start(

@@ -594,7 +594,7 @@ async def search_products(request: Request, q: str = Query(...), index: int = Qu
     """Search Instacart for a product (used by the product picker)."""
     from alexacart.instacart.agent import InstacartAgent
 
-    agent = InstacartAgent()
+    agent = InstacartAgent(headless=True)
     try:
         results = await agent.search_product(q)
         product_dicts = [
@@ -626,7 +626,7 @@ async def fetch_product_url(request: Request, url: str = Form(...), index: int =
     """Fetch product details from a custom Instacart URL."""
     from alexacart.instacart.agent import InstacartAgent
 
-    agent = InstacartAgent()
+    agent = InstacartAgent(headless=True)
     try:
         result = await agent.check_product_by_url(url)
         if result:

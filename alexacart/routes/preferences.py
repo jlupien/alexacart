@@ -138,7 +138,7 @@ async def add_product_from_url(
     if not item:
         return HTMLResponse('<div class="status-message status-error">Item not found</div>', status_code=404)
 
-    agent = InstacartAgent()
+    agent = InstacartAgent(headless=True)
     try:
         result = await agent.check_product_by_url(url)
         if not result:

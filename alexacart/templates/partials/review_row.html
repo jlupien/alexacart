@@ -3,7 +3,8 @@
         {{ item.alexa_text }}
         {% if item.extra_alexa_items %}
         <span class="dedup-extras">
-            {% for extra in item.extra_alexa_items %}{{ extra.text }}{% if not loop.last %}, {% endif %}{% endfor %}
+            {% for extra in item.extra_alexa_items %}<span class="dedup-extra-item">{{ extra.text }}</span>
+            {% endfor %}
         </span>
         {% endif %}
     </td>

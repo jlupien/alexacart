@@ -2,9 +2,8 @@
     <td class="alexa-text">
         {{ item.alexa_text }}
         {% if item.extra_alexa_items %}
-        <span class="badge badge-info"
-              title="Also on list: {{ item.extra_alexa_items | map(attribute='text') | join(', ') }}">
-            &times;{{ 1 + item.extra_alexa_items|length }}
+        <span class="dedup-extras">
+            {% for extra in item.extra_alexa_items %}{{ extra.text }}{% if not loop.last %}, {% endif %}{% endfor %}
         </span>
         {% endif %}
     </td>

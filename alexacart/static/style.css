@@ -213,6 +213,13 @@ main {
     border-bottom: none;
 }
 
+.dedup-extras {
+    display: block;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    margin-top: 0.2rem;
+}
+
 /* Badges */
 .badge {
     display: inline-block;

@@ -1,13 +1,5 @@
 <tr id="row-{{ item.index }}" class="review-row">
-    <td class="alexa-text">
-        {{ item.alexa_text }}
-        {% if item.extra_alexa_items %}
-        <span class="badge badge-info"
-              title="Also on list: {{ item.extra_alexa_items | map(attribute='text') | join(', ') }}">
-            &times;{{ 1 + item.extra_alexa_items|length }}
-        </span>
-        {% endif %}
-    </td>
+    <td class="alexa-text">{{ item.alexa_text }}</td>
     <td class="product-cell">
         <input type="hidden" name="items[{{ item.index }}][alexa_text]" value="{{ item.alexa_text }}">
         <input type="hidden" name="items[{{ item.index }}][product_name]" value="{{ item.product_name or '' }}" class="hidden-product-name">
@@ -17,8 +9,6 @@
         <input type="hidden" name="items[{{ item.index }}][grocery_item_id]" value="{{ item.grocery_item_id or '' }}">
         <input type="hidden" name="items[{{ item.index }}][alexa_item_id]" value="{{ item.alexa_item_id or '' }}">
         <input type="hidden" name="items[{{ item.index }}][skip]" value="" class="hidden-skip">
-        <input type="hidden" name="items[{{ item.index }}][extra_alexa_items]"
-               value="{{ item.extra_alexa_items | tojson if item.extra_alexa_items else '' }}">
 
         {% if item.alternatives %}
         {# Multiple search results — radio for each #}

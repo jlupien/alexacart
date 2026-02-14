@@ -94,17 +94,17 @@ class InstacartAgent:
         return await session._cdp_get_cookies()
 
     async def inject_cookies(self, cookies: list[dict]) -> None:
-        """Inject cookies into this browser session via CDP."""
+        """Inject cookies into this browser session via CDP.
+
+        Network.setCookies is a browser-level command — no page navigation needed.
+        The cookies already carry their domain fields from the auth agent.
+        """
         session = await self._get_session()
         # Ensure browser is started
         try:
             session.cdp_client
         except (AssertionError, AttributeError):
             await session.start()
-
-        # Navigate to Instacart so cookie domain context is established
-        await session.navigate_to(f"{INSTACART_BASE}")
-        await asyncio.sleep(1)
 
         cdp_session = await session.get_or_create_cdp_session(target_id=None)
         # Filter to Instacart-related cookies

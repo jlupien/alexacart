@@ -176,13 +176,19 @@ function fetchProductUrl(index) {
     var spinner = document.getElementById('url-spinner-' + index);
     var fetchBtn = document.getElementById('fetch-btn-' + index);
 
-    if (fetchBtn) fetchBtn.disabled = true;
+    if (fetchBtn) {
+        fetchBtn.disabled = true;
+        fetchBtn.dataset.origText = fetchBtn.textContent;
+        fetchBtn.textContent = 'Fetching\u2026';
+    }
     if (spinner) spinner.style.display = 'inline-block';
     if (resultDiv) resultDiv.innerHTML = '';
 
     var formData = new FormData();
     formData.append('url', urlInput.value);
     formData.append('index', index);
+    var sessionInput = document.querySelector('input[name="session_id"]');
+    if (sessionInput) formData.append('session_id', sessionInput.value);
 
     fetch('/order/fetch-url', { method: 'POST', body: formData })
         .then(function(resp) {
@@ -206,6 +212,9 @@ function fetchProductUrl(index) {
         })
         .finally(function() {
             if (spinner) spinner.style.display = 'none';
-            if (fetchBtn) fetchBtn.disabled = false;
+            if (fetchBtn) {
+                fetchBtn.disabled = false;
+                fetchBtn.textContent = fetchBtn.dataset.origText || 'Fetch';
+            }
         });
 }

@@ -622,11 +622,33 @@ async def search_products(request: Request, q: str = Query(...), index: int = Qu
 
 
 @router.post("/fetch-url")
-async def fetch_product_url(request: Request, url: str = Form(...), index: int = Form(0)):
+async def fetch_product_url(
+    request: Request,
+    url: str = Form(...),
+    index: int = Form(0),
+    session_id: str = Form(""),
+):
     """Fetch product details from a custom Instacart URL."""
     from alexacart.instacart.agent import InstacartAgent
 
-    agent = InstacartAgent(headless=True)
+    # Reuse an agent from the active order's BrowserPool when available,
+    # instead of launching a brand-new browser (which can timeout).
+    pool = None
+    agent = None
+    borrowed = False
+
+    session = _sessions.get(session_id) if session_id else None
+    if session and session.browser_pool and not session.browser_pool._closed:
+        pool = session.browser_pool
+        try:
+            agent = await asyncio.wait_for(pool.acquire(), timeout=5)
+            borrowed = True
+        except (asyncio.TimeoutError, Exception):
+            agent = None
+
+    if agent is None:
+        agent = InstacartAgent(headless=True)
+
     try:
         result = await agent.check_product_by_url(url)
         if result:
@@ -648,7 +670,10 @@ async def fetch_product_url(request: Request, url: str = Form(...), index: int =
             f'Error: {html_escape(str(e))}</div>'
         )
     finally:
-        await agent.close()
+        if borrowed and pool:
+            pool.release(agent)
+        elif not borrowed:
+            await agent.close()
 
 
 @router.post("/commit")
@@ -922,6 +947,7 @@ async def commit_progress_stream(session_id: str):
                 auto_count = session.auto_committed_count
                 total_added = added_count + auto_count
                 total_all = total_count + auto_count
+                store_slug = settings.instacart_store.lower()
                 summary = (
                     f'<div class="results-summary card">'
                     f"<h3>Order Complete</h3>"
@@ -934,8 +960,11 @@ async def commit_progress_stream(session_id: str):
                     summary += f", {skipped_count} skipped"
                 summary += (
                     f"</p>"
-                    f'<a href="/order/" class="btn btn-primary">Start New Order</a>'
-                    f"</div>"
+                    f'<div style="display:flex;gap:0.75rem;justify-content:center">'
+                    f'<a href="https://www.instacart.com/store/{store_slug}/storefront" '
+                    f'target="_blank" class="btn btn-primary">Review Cart on Instacart</a>'
+                    f'<a href="/order/" class="btn btn-outline">Start New Order</a>'
+                    f"</div></div>"
                 )
                 yield {"event": "progress", "data": summary}
                 yield {"event": "close", "data": ""}

@@ -499,6 +499,80 @@ class InstacartAgent:
             logger.warning("Product page image extraction failed (non-critical): %s", e)
             return None
 
+    async def click_add_to_cart_on_current_page(self) -> bool:
+        """
+        Click 'Add to cart' on the already-loaded product page via JavaScript.
+
+        Used after check_product_by_url() to avoid re-navigating and spinning up
+        a new LLM agent. Should take ~2-3s instead of ~20s.
+
+        Returns True if the item was added (or was already in cart).
+        """
+        js_check_and_click = """
+            (function() {
+                var elems = document.querySelectorAll('button, [role="button"]');
+
+                // Check if already in cart
+                for (var i = 0; i < elems.length; i++) {
+                    var t = (elems[i].textContent || '').trim();
+                    if (/\\d+\\s*in\\s*cart/i.test(t)) return 'ALREADY_IN_CART';
+                }
+
+                // Find and click "Add to cart" button
+                for (var i = 0; i < elems.length; i++) {
+                    var t = (elems[i].textContent || '').trim().toLowerCase();
+                    if ((t === 'add to cart' || t === 'add') && !elems[i].disabled) {
+                        elems[i].click();
+                        return 'CLICKED';
+                    }
+                }
+
+                return 'NOT_FOUND';
+            })()
+        """
+
+        try:
+            result = await self._run_js(js_check_and_click)
+
+            if "ALREADY_IN_CART" in result:
+                logger.info("Product already in cart (JS fast-path)")
+                return True
+
+            if "CLICKED" in result:
+                # Wait for Instacart to process the add and update the UI
+                await asyncio.sleep(2)
+
+                # Verify the add succeeded
+                js_confirm = """
+                    (function() {
+                        var elems = document.querySelectorAll('button, [role="button"]');
+                        for (var i = 0; i < elems.length; i++) {
+                            var t = (elems[i].textContent || '').trim();
+                            if (/\\d+\\s*in\\s*cart/i.test(t)) return 'CONFIRMED';
+                        }
+                        // If "Add to cart" button is gone, likely succeeded
+                        for (var i = 0; i < elems.length; i++) {
+                            var t = (elems[i].textContent || '').trim().toLowerCase();
+                            if (t === 'add to cart' || t === 'add') return 'STILL_SHOWING';
+                        }
+                        return 'LIKELY_ADDED';
+                    })()
+                """
+                confirm = await self._run_js(js_confirm)
+                if "CONFIRMED" in confirm or "LIKELY_ADDED" in confirm:
+                    logger.info("Product added to cart (JS fast-path)")
+                    return True
+
+                logger.warning("JS add-to-cart click may not have succeeded: %s", confirm)
+                return False
+
+            logger.warning("Could not find 'Add to cart' button on current page (JS fast-path): %s", result)
+            return False
+
+        except Exception as e:
+            logger.error("JS add-to-cart failed: %s", e)
+            return False
+
     async def add_to_cart_by_url(self, product_url: str) -> bool:
         """
         Navigate directly to a product page and add it to the cart.

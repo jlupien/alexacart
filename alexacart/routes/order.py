@@ -352,10 +352,18 @@ async def _search_single_item(
                     # Auto-commit rank-1 matches immediately
                     if pref.rank == 1:
                         try:
-                            added = await worker.add_to_cart(
-                                proposal.product_name,
-                                product_url=proposal.product_url or None,
-                            )
+                            # Fast-path: click "Add to cart" on the already-loaded
+                            # product page via JS (no navigation or LLM call)
+                            added = await worker.click_add_to_cart_on_current_page()
+                            if not added:
+                                logger.warning(
+                                    "JS fast-path add-to-cart failed for '%s', falling back to LLM agent",
+                                    proposal.alexa_text,
+                                )
+                                added = await worker.add_to_cart(
+                                    proposal.product_name,
+                                    product_url=proposal.product_url or None,
+                                )
                         except Exception as add_err:
                             logger.warning(
                                 "Auto-commit add_to_cart failed for '%s': %s",

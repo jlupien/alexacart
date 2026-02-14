@@ -106,7 +106,25 @@ async def _check_amazon_login(page) -> bool:
     return False
 
 
-async def extract_cookies_via_nodriver(on_status=None) -> dict:
+async def _extract_and_save_cookies(browser, _status) -> dict:
+    """Extract Amazon cookies from a nodriver browser and save to disk."""
+    _status("Extracting Amazon cookies...")
+    all_cookies = await browser.cookies.get_all()
+    cookies = {}
+    for c in all_cookies:
+        domain = getattr(c, "domain", "") or ""
+        name = getattr(c, "name", "") or ""
+        value = getattr(c, "value", "") or ""
+        if "amazon" in domain and name and value:
+            cookies[name] = value
+    logger.info("Extracted %d Amazon cookies via nodriver", len(cookies))
+    logger.info("Cookie names: %s", sorted(cookies.keys()))
+    result = {"cookies": cookies, "source": "nodriver"}
+    save_cookies(result)
+    return result
+
+
+async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> dict:
     """
     Open an undetectable Chrome instance via nodriver, ensure the user is
     logged into Amazon, and extract session cookies.
@@ -116,6 +134,9 @@ async def extract_cookies_via_nodriver(on_status=None) -> dict:
 
     Args:
         on_status: Optional callback(str) for progress messages.
+        force_relogin: If True, skip headless check — open a visible browser,
+            sign out of Amazon, and wait for fresh login. Used when the
+            automatic headless refresh gets stale cookies that still 401.
 
     Returns cookie data dict with 'cookies' key.
     """
@@ -150,7 +171,37 @@ async def extract_cookies_via_nodriver(on_status=None) -> dict:
             shutil.rmtree(session_dir, ignore_errors=True)
             logger.info("Cleared session storage: %s", session_dir)
 
-    # Start headless — only open a visible window if login is actually needed
+    if force_relogin:
+        # Skip headless check — open visible browser and force a fresh login
+        _status("Session expired — opening Amazon for re-login...")
+        browser = await uc.start(
+            user_data_dir=str(profile_dir),
+            headless=False,
+        )
+        try:
+            # Sign out first to clear the stale session
+            page = await browser.get("https://www.amazon.com/gp/flex/sign-out.html")
+            await page.sleep(3)
+
+            _status("Please log into Amazon in the browser window...")
+            logged_in = False
+            for _ in range(100):  # Up to ~5 minutes
+                await page.sleep(3)
+                if await _check_amazon_login(page):
+                    logged_in = True
+                    break
+
+            if not logged_in:
+                raise RuntimeError("Timed out waiting for Amazon re-login")
+
+            return await _extract_and_save_cookies(browser, _status)
+        finally:
+            try:
+                browser.stop()
+            except Exception:
+                pass
+
+    # Normal mode: start headless — only open a visible window if login is actually needed
     _status("Checking Amazon login...")
     browser = await uc.start(
         user_data_dir=str(profile_dir),
@@ -187,23 +238,7 @@ async def extract_cookies_via_nodriver(on_status=None) -> dict:
             if not logged_in:
                 raise RuntimeError("Timed out waiting for Amazon login")
 
-        _status("Extracting Amazon cookies...")
-        all_cookies = await browser.cookies.get_all()
-
-        cookies = {}
-        for c in all_cookies:
-            domain = getattr(c, "domain", "") or ""
-            name = getattr(c, "name", "") or ""
-            value = getattr(c, "value", "") or ""
-            if "amazon" in domain and name and value:
-                cookies[name] = value
-
-        logger.info("Extracted %d Amazon cookies via nodriver", len(cookies))
-        logger.info("Cookie names: %s", sorted(cookies.keys()))
-
-        result = {"cookies": cookies, "source": "nodriver"}
-        save_cookies(result)
-        return result
+        return await _extract_and_save_cookies(browser, _status)
 
     finally:
         try:

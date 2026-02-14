@@ -71,6 +71,7 @@ class ProposalItem:
     in_stock: bool = True
     alternatives: list[ProductOption] = field(default_factory=list)
     extra_alexa_items: list[dict] = field(default_factory=list)
+    auto_committed: bool = False  # True if added to cart during search (rank 1 match)
 
 
 @dataclass
@@ -90,6 +91,7 @@ class OrderSession:
     browser_pool: object | None = None
     # Detailed status text shown during logging_in phase
     status_detail: str = ""
+    auto_committed_count: int = 0
 
 
 @router.get("/")
@@ -170,67 +172,75 @@ async def _run_order(session: OrderSession):
             return
 
         # Step 2: Fetch Alexa shopping list using nodriver cookies
+        # AlexaClient stays open through search phase for auto-commit check-offs
         session.status_detail = "Fetching your Alexa shopping list..."
-        alexa_client = AlexaClient(cookie_refresh_fn=lambda: extract_cookies_via_nodriver())
+        alexa_client = AlexaClient(
+            cookie_refresh_fn=lambda: extract_cookies_via_nodriver(),
+            interactive_cookie_refresh_fn=lambda: extract_cookies_via_nodriver(
+                on_status=on_status,
+                force_relogin=True,
+            ),
+        )
         try:
-            items = await alexa_client.get_items()
-        except Exception as e:
-            error_str = str(e)
-            logger.error("Alexa list fetch failed: %s", error_str, exc_info=True)
-            if "401" in error_str:
-                session.error = (
-                    "Amazon session not authorized for Shopping List API. "
-                    "Please log into amazon.com in the browser window and try again."
+            try:
+                items = await alexa_client.get_items()
+            except Exception as e:
+                error_str = str(e)
+                logger.error("Alexa list fetch failed: %s", error_str, exc_info=True)
+                if "401" in error_str:
+                    session.error = (
+                        "Amazon session not authorized for Shopping List API. "
+                        "Please log into amazon.com in the browser window and try again."
+                    )
+                elif "503" in error_str or "502" in error_str:
+                    session.error = "Amazon servers are temporarily unavailable. Please try again in a minute."
+                else:
+                    session.error = f"Failed to fetch Alexa list: {error_str}"
+                session.status = "error"
+                return
+
+            if not items:
+                session.error = "No items found on your Alexa Grocery List. Add some items via Alexa and try again."
+                session.status = "error"
+                return
+
+            # Deduplicate items: group by grocery_item_id (known) or normalized text (unknown)
+            db = SessionLocal()
+            try:
+                groups: dict[str | int, list] = {}
+                for item in items:
+                    normalized = normalize_text(item.text)
+                    alias = db.query(Alias).filter(Alias.alias == normalized).first()
+                    if alias:
+                        key = alias.grocery_item_id
+                    else:
+                        key = f"_unknown:{normalized}"
+                    groups.setdefault(key, []).append(item)
+            finally:
+                db.close()
+
+            for i, group_items in enumerate(groups.values()):
+                primary = group_items[0]
+                extras = group_items[1:]
+                session.proposals.append(
+                    ProposalItem(
+                        index=i,
+                        alexa_text=primary.text,
+                        alexa_item_id=primary.item_id,
+                        alexa_list_id=primary.list_id,
+                        alexa_item_version=primary.version,
+                        extra_alexa_items=[
+                            {"item_id": e.item_id, "text": e.text, "list_id": e.list_id, "version": e.version}
+                            for e in extras
+                        ],
+                    )
                 )
-            elif "503" in error_str or "502" in error_str:
-                session.error = "Amazon servers are temporarily unavailable. Please try again in a minute."
-            else:
-                session.error = f"Failed to fetch Alexa list: {error_str}"
-            session.status = "error"
-            return
+            session.total_items = len(session.proposals)
+
+            # Step 4: Search Instacart for each item (pool is already running)
+            await _search_items(session, pool, alexa_client)
         finally:
             await alexa_client.close()
-
-        if not items:
-            session.error = "No items found on your Alexa Grocery List. Add some items via Alexa and try again."
-            session.status = "error"
-            return
-
-        # Deduplicate items: group by grocery_item_id (known) or normalized text (unknown)
-        db = SessionLocal()
-        try:
-            groups: dict[str | int, list] = {}
-            for item in items:
-                normalized = normalize_text(item.text)
-                alias = db.query(Alias).filter(Alias.alias == normalized).first()
-                if alias:
-                    key = alias.grocery_item_id
-                else:
-                    key = f"_unknown:{normalized}"
-                groups.setdefault(key, []).append(item)
-        finally:
-            db.close()
-
-        for i, group_items in enumerate(groups.values()):
-            primary = group_items[0]
-            extras = group_items[1:]
-            session.proposals.append(
-                ProposalItem(
-                    index=i,
-                    alexa_text=primary.text,
-                    alexa_item_id=primary.item_id,
-                    alexa_list_id=primary.list_id,
-                    alexa_item_version=primary.version,
-                    extra_alexa_items=[
-                        {"item_id": e.item_id, "text": e.text, "list_id": e.list_id, "version": e.version}
-                        for e in extras
-                    ],
-                )
-            )
-        session.total_items = len(session.proposals)
-
-        # Step 4: Search Instacart for each item (pool is already running)
-        await _search_items(session, pool)
 
     except Exception as e:
         logger.exception("Order flow failed")
@@ -272,8 +282,41 @@ async def _apply_search_results(
         proposal.status_class = "error"
 
 
+async def _auto_checkoff_alexa(alexa_client, proposal: ProposalItem):
+    """Check off a proposal's primary + duplicate Alexa items. Returns True if all succeeded."""
+    from alexacart.alexa.client import AlexaListItem
+
+    if not proposal.alexa_item_id or settings.skip_alexa_checkoff:
+        if settings.skip_alexa_checkoff:
+            logger.info("Skipping Alexa check-off for '%s' (SKIP_ALEXA_CHECKOFF=true)", proposal.alexa_text)
+        return True
+
+    alexa_item = AlexaListItem(
+        item_id=proposal.alexa_item_id,
+        text=proposal.alexa_text,
+        list_id=proposal.alexa_list_id,
+        version=proposal.alexa_item_version,
+    )
+    checked_off = await alexa_client.mark_complete(alexa_item)
+    if not checked_off:
+        logger.warning("Could not check off '%s' on Alexa list", proposal.alexa_text)
+
+    for extra in proposal.extra_alexa_items:
+        extra_item = AlexaListItem(
+            item_id=extra["item_id"],
+            text=extra["text"],
+            list_id=extra["list_id"],
+            version=extra["version"],
+        )
+        extra_ok = await alexa_client.mark_complete(extra_item)
+        if not extra_ok:
+            logger.warning("Could not check off duplicate '%s' on Alexa list", extra["text"])
+
+    return checked_off
+
+
 async def _search_single_item(
-    session: OrderSession, proposal: ProposalItem, pool,
+    session: OrderSession, proposal: ProposalItem, pool, alexa_client,
 ):
     """Search Instacart for a single item using a worker from the pool."""
     worker = await pool.acquire()
@@ -300,13 +343,70 @@ async def _search_single_item(
                     proposal.brand = result.brand or pref.brand
                     proposal.price = result.price
                     proposal.image_url = result.image_url or pref.image_url
-                    proposal.status = f"Matched (choice #{pref.rank})"
-                    proposal.status_class = "matched"
                     proposal.in_stock = True
                     found = True
 
                     pref.last_seen_in_stock = datetime.now(UTC)
                     db.commit()
+
+                    # Auto-commit rank-1 matches immediately
+                    if pref.rank == 1:
+                        try:
+                            added = await worker.add_to_cart(
+                                proposal.product_name,
+                                product_url=proposal.product_url or None,
+                            )
+                        except Exception as add_err:
+                            logger.warning(
+                                "Auto-commit add_to_cart failed for '%s': %s",
+                                proposal.alexa_text, add_err,
+                            )
+                            added = False
+
+                        if added:
+                            proposal.auto_committed = True
+                            proposal.status = "Auto-added (choice #1)"
+                            proposal.status_class = "matched"
+                            session.auto_committed_count += 1
+
+                            try:
+                                await _auto_checkoff_alexa(alexa_client, proposal)
+                            except Exception as chk_err:
+                                logger.warning(
+                                    "Auto-commit Alexa check-off failed for '%s': %s",
+                                    proposal.alexa_text, chk_err,
+                                )
+
+                            _learn_from_result(
+                                db,
+                                alexa_text=proposal.alexa_text,
+                                grocery_item_id=proposal.grocery_item_id,
+                                final_product=proposal.product_name,
+                                product_url=proposal.product_url,
+                                brand=proposal.brand,
+                                image_url=proposal.image_url,
+                                was_corrected=False,
+                            )
+
+                            log_entry = OrderLog(
+                                session_id=session.session_id,
+                                alexa_text=proposal.alexa_text,
+                                matched_grocery_item_id=proposal.grocery_item_id,
+                                proposed_product=proposal.product_name,
+                                final_product=proposal.product_name,
+                                was_corrected=False,
+                                added_to_cart=True,
+                            )
+                            db.add(log_entry)
+                            db.commit()
+                        else:
+                            # Fallback: show normally on review page
+                            proposal.status = f"Matched (choice #{pref.rank})"
+                            proposal.status_class = "matched"
+                    else:
+                        proposal.status = f"Matched (choice #{pref.rank})"
+                        proposal.status_class = "matched"
+
                     break
 
             if not found:
@@ -330,7 +430,7 @@ async def _search_single_item(
         pool.release(worker)
 
 
-async def _search_items(session: OrderSession, pool):
+async def _search_items(session: OrderSession, pool, alexa_client):
     """Search Instacart for each item in the session — in parallel via BrowserPool."""
     session.status = "searching"
 
@@ -343,7 +443,7 @@ async def _search_items(session: OrderSession, pool):
         # Launch all searches concurrently — pool limits actual parallelism
         results = await asyncio.gather(
             *[
-                _search_single_item(session, proposal, pool)
+                _search_single_item(session, proposal, pool, alexa_client)
                 for proposal in session.proposals
             ],
             return_exceptions=True,
@@ -428,6 +528,12 @@ async def progress_stream(session_id: str):
                 f"Searched {session.searched_count} of {session.total_items} items ({pct}%)"
                 f"</p>"
             )
+            if session.auto_committed_count > 0:
+                html += (
+                    f'<p class="progress-text">'
+                    f"&#10003; {session.auto_committed_count} item(s) auto-added to cart"
+                    f"</p>"
+                )
             if active:
                 items_str = ", ".join(html_escape(a) for a in active[:4])
                 if len(active) > 4:
@@ -608,8 +714,6 @@ async def _commit_single_item(
     commit_counter: list,
 ) -> dict:
     """Add a single item to Instacart cart and check off Alexa list."""
-    from alexacart.alexa.client import AlexaListItem
-
     product_name = data.get("product_name", "")
     alexa_text = data.get("alexa_text", "")
     grocery_item_id = data.get("grocery_item_id", "")
@@ -660,31 +764,8 @@ async def _commit_single_item(
         added = await worker.add_to_cart(product_name, product_url=product_url or None)
         checked_off = True
 
-        if added and alexa_item_id and not settings.skip_alexa_checkoff:
-            alexa_item = AlexaListItem(
-                item_id=alexa_item_id,
-                text=alexa_text,
-                list_id=proposal.alexa_list_id if proposal else "",
-                version=proposal.alexa_item_version if proposal else 1,
-            )
-            checked_off = await alexa_client.mark_complete(alexa_item)
-            if not checked_off:
-                logger.warning("Could not check off '%s' on Alexa list", alexa_text)
-            # Check off any grouped duplicate items
-            extra_items_json = data.get("extra_alexa_items", "")
-            if extra_items_json:
-                for extra in json.loads(extra_items_json):
-                    extra_item = AlexaListItem(
-                        item_id=extra["item_id"],
-                        text=extra["text"],
-                        list_id=extra["list_id"],
-                        version=extra["version"],
-                    )
-                    extra_ok = await alexa_client.mark_complete(extra_item)
-                    if not extra_ok:
-                        logger.warning("Could not check off duplicate '%s' on Alexa list", extra["text"])
-        elif settings.skip_alexa_checkoff:
-            logger.info("Skipping Alexa check-off for '%s' (SKIP_ALEXA_CHECKOFF=true)", alexa_text)
+        if added and proposal:
+            checked_off = await _auto_checkoff_alexa(alexa_client, proposal)
 
         was_corrected = False
         if proposal and proposal.product_name and proposal.product_name != product_name:
@@ -759,7 +840,12 @@ async def _run_commit(session: OrderSession):
         session.browser_pool = pool
         await pool.start_with_auth()
 
-    alexa_client = AlexaClient(cookie_refresh_fn=lambda: extract_cookies_via_nodriver())
+    alexa_client = AlexaClient(
+        cookie_refresh_fn=lambda: extract_cookies_via_nodriver(),
+        interactive_cookie_refresh_fn=lambda: extract_cookies_via_nodriver(
+            force_relogin=True,
+        ),
+    )
     q = session.commit_queue
     total = sum(1 for d in session.commit_items_data.values() if d.get("skip") != "1")
     commit_counter = [0]  # mutable counter shared across parallel tasks
@@ -835,12 +921,17 @@ async def commit_progress_stream(session_id: str):
 
             if event_type == "complete":
                 _, added_count, skipped_count, total_count = event
+                auto_count = session.auto_committed_count
+                total_added = added_count + auto_count
+                total_all = total_count + auto_count
                 summary = (
                     f'<div class="results-summary card">'
                     f"<h3>Order Complete</h3>"
                     f'<p class="muted" style="margin-bottom:1rem">'
-                    f"{added_count} of {total_count} items added to cart"
+                    f"{total_added} of {total_all} items added to cart"
                 )
+                if auto_count:
+                    summary += f" ({auto_count} auto-added)"
                 if skipped_count:
                     summary += f", {skipped_count} skipped"
                 summary += (

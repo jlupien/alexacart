@@ -52,15 +52,19 @@ class AlexaListItem:
 
 
 class AlexaClient:
-    def __init__(self, cookie_refresh_fn=None):
+    def __init__(self, cookie_refresh_fn=None, interactive_cookie_refresh_fn=None):
         """
         Args:
             cookie_refresh_fn: Optional async callable that returns fresh cookie data.
                 Used to re-extract cookies from the browser session on 401.
+            interactive_cookie_refresh_fn: Optional async callable for interactive
+                re-login (visible browser, user signs in). Called as a last resort
+                when the automatic refresh still gets 401.
         """
         self._cookies: dict | None = None
         self._client: httpx.AsyncClient | None = None
         self._cookie_refresh_fn = cookie_refresh_fn
+        self._interactive_cookie_refresh_fn = interactive_cookie_refresh_fn
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._cookies is None:
@@ -74,6 +78,22 @@ class AlexaClient:
             )
             self._client = httpx.AsyncClient(headers=headers, timeout=30.0)
         return self._client
+
+    async def _update_cookies_and_retry(self, cookie_data, method, url, **kwargs) -> httpx.Response:
+        """Rebuild the HTTP client with new cookies and retry the request."""
+        self._cookies = cookie_data
+        headers = {**COMMON_HEADERS, **get_cookie_header(cookie_data)}
+        old_client = self._client
+        self._client = httpx.AsyncClient(headers=headers, timeout=30.0)
+        if old_client:
+            await old_client.aclose()
+        logger.info("Retrying request after cookie refresh...")
+        resp = await self._client.request(method, url, **kwargs)
+        logger.info("Post-refresh response: %d for %s %s", resp.status_code, method, url)
+        if resp.status_code not in (200, 204):
+            body = resp.text[:500] if resp.text else "(empty)"
+            logger.warning("Post-refresh error body: %s", body)
+        return resp
 
     async def _request_with_retry(self, method: str, url: str, **kwargs) -> httpx.Response:
         """Make a request with retries for transient errors (503/502/429) and 401 cookie refresh."""
@@ -124,19 +144,30 @@ class AlexaClient:
                     refreshed = await asyncio.to_thread(try_refresh_via_sidecar)
 
                 if refreshed:
-                    self._cookies = refreshed
-                    headers = {**COMMON_HEADERS, **get_cookie_header(refreshed)}
-                    old_client = self._client
-                    self._client = httpx.AsyncClient(headers=headers, timeout=30.0)
-                    client = self._client
-                    if old_client:
-                        await old_client.aclose()
-                    logger.info("Retrying request after cookie refresh...")
-                    resp = await client.request(method, url, **kwargs)
-                    logger.info("Post-refresh response: %d for %s %s", resp.status_code, method, url)
-                    if resp.status_code not in (200, 204):
-                        body = resp.text[:500] if resp.text else "(empty)"
-                        logger.warning("Post-refresh error body: %s", body)
+                    resp = await self._update_cookies_and_retry(refreshed, method, url, **kwargs)
+
+                    # If still 401, try interactive re-login as last resort
+                    if resp.status_code == 401 and self._interactive_cookie_refresh_fn:
+                        logger.info("Automatic refresh failed (still 401), trying interactive re-login...")
+                        try:
+                            interactive_data = await self._interactive_cookie_refresh_fn()
+                            if interactive_data:
+                                resp = await self._update_cookies_and_retry(
+                                    interactive_data, method, url, **kwargs
+                                )
+                        except Exception as e:
+                            logger.warning("Interactive cookie refresh failed: %s", e)
+                elif self._interactive_cookie_refresh_fn:
+                    # No automatic refresh available at all — go straight to interactive
+                    logger.info("No automatic refresh available, trying interactive re-login...")
+                    try:
+                        interactive_data = await self._interactive_cookie_refresh_fn()
+                        if interactive_data:
+                            resp = await self._update_cookies_and_retry(
+                                interactive_data, method, url, **kwargs
+                            )
+                    except Exception as e:
+                        logger.warning("Interactive cookie refresh failed: %s", e)
                 else:
                     logger.warning("No cookie refresh available — returning 401 as-is")
                 return resp

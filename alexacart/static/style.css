@@ -438,7 +438,8 @@ main {
 .commit-section {
     margin-top: 1.5rem;
     display: flex;
-    justify-content: center;
+    flex-direction: column;
+    align-items: center;
 }
 
 /* Pulse animation for active commit badge */

@@ -10,10 +10,12 @@
 
 <div class="start-section">
     <button
+        id="start-btn"
         class="btn btn-primary btn-lg"
         hx-post="/order/start"
         hx-target="#order-status"
         hx-indicator="#spinner"
+        hx-on::before-request="this.disabled = true; this.textContent = 'Starting...'"
     >
         Start Order
     </button>

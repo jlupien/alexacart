@@ -1,6 +1,6 @@
 <div class="card preference-card" id="pref-{{ item.id }}">
     <div class="pref-header">
-        <h3>{{ item.name }}</h3>
+        <h3><a href="https://www.instacart.com/store/{{ instacart_store | lower }}/search/{{ item.name | urlencode }}" target="_blank">{{ item.name }}</a></h3>
         <button
             class="btn btn-sm btn-danger"
             hx-delete="/preferences/items/{{ item.id }}"

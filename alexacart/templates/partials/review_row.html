@@ -1,6 +1,6 @@
 <tr id="row-{{ item.index }}" class="review-row">
     <td class="alexa-text">
-        {{ item.alexa_text }}
+        <a href="https://www.instacart.com/store/{{ instacart_store | lower }}/search/{{ item.alexa_text | urlencode }}" target="_blank">{{ item.alexa_text }}</a>
         {% if item.extra_alexa_items %}
         <span class="dedup-extras">
             {% for extra in item.extra_alexa_items %}<span class="dedup-extra-item">{{ extra.text }}</span>

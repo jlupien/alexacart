@@ -6,12 +6,14 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from alexacart.config import settings
 from alexacart.db import init_db
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+templates.env.globals["instacart_store"] = settings.instacart_store
 
 
 class _JudgeWarningFilter(logging.Filter):

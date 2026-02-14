@@ -330,29 +330,13 @@ class InstacartAgent:
         # Visit alexa.amazon.com to establish Alexa session cookies (csrf, etc.)
         # These are on a different domain than www.amazon.com and won't exist
         # unless the browser actually visits the Alexa subdomain.
-        # The SPA sets the csrf cookie via JavaScript, so we poll for it rather
-        # than using a fixed sleep — page load times vary widely.
         try:
             await session.navigate_to("https://alexa.amazon.com/spa/index.html")
-            all_cookies = None
-            for _ in range(15):
-                await asyncio.sleep(1)
-                all_cookies = await session._cdp_get_cookies()
-                if any(
-                    c.get("name") == "csrf" and "amazon" in c.get("domain", "")
-                    for c in all_cookies
-                ):
-                    logger.info("Alexa csrf cookie found")
-                    break
-            else:
-                logger.warning("Alexa csrf cookie not found after 15s — extracting available cookies")
+            await asyncio.sleep(3)  # Give it time to set session cookies
         except Exception as e:
             logger.warning("Failed to navigate to alexa.amazon.com: %s", e)
-            all_cookies = None
 
-        if all_cookies is None:
-            all_cookies = await session._cdp_get_cookies()
-
+        all_cookies = await session._cdp_get_cookies()
         cookies = {}
         for cookie in all_cookies:
             domain = cookie.get("domain", "")

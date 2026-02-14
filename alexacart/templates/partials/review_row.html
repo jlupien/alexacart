@@ -125,7 +125,7 @@
                 <summary class="btn btn-xs btn-outline">Use custom URL</summary>
                 <div class="inline-form">
                     <input type="url" placeholder="Paste Instacart product URL..." style="flex:1" class="custom-url-val-{{ item.index }}">
-                    <button type="button" class="btn btn-sm btn-primary" onclick="fetchProductUrl({{ item.index }})">Fetch</button>
+                    <button type="button" id="fetch-btn-{{ item.index }}" class="btn btn-sm btn-primary" onclick="fetchProductUrl({{ item.index }})">Fetch</button>
                     <span id="url-spinner-{{ item.index }}" class="htmx-indicator">Loading...</span>
                 </div>
                 <div id="custom-result-{{ item.index }}"></div>

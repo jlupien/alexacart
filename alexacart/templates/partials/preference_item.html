@@ -59,7 +59,7 @@
         {% if url_error is defined and url_error %}
         <div class="status-message status-error" style="margin-bottom: 0.5rem; padding: 0.5rem 0.75rem; font-size: 0.85rem;">{{ url_error }}</div>
         {% endif %}
-        <form class="inline-form" hx-post="/preferences/items/{{ item.id }}/products/from-url" hx-target="#pref-{{ item.id }}" hx-swap="outerHTML" hx-indicator="#url-spinner-{{ item.id }}">
+        <form class="inline-form" hx-post="/preferences/items/{{ item.id }}/products/from-url" hx-target="#pref-{{ item.id }}" hx-swap="outerHTML" hx-indicator="#url-spinner-{{ item.id }}" hx-disabled-elt="find .btn-primary">
             <input type="url" name="url" placeholder="Paste Instacart product URL..." required style="flex: 1;">
             <button type="submit" class="btn btn-sm btn-primary">Add from URL</button>
             <span id="url-spinner-{{ item.id }}" class="htmx-indicator">Loading...</span>

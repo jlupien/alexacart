@@ -174,7 +174,9 @@ function fetchProductUrl(index) {
 
     var resultDiv = document.getElementById('custom-result-' + index);
     var spinner = document.getElementById('url-spinner-' + index);
+    var fetchBtn = document.getElementById('fetch-btn-' + index);
 
+    if (fetchBtn) fetchBtn.disabled = true;
     if (spinner) spinner.style.display = 'inline-block';
     if (resultDiv) resultDiv.innerHTML = '';
 
@@ -204,5 +206,6 @@ function fetchProductUrl(index) {
         })
         .finally(function() {
             if (spinner) spinner.style.display = 'none';
+            if (fetchBtn) fetchBtn.disabled = false;
         });
 }

@@ -333,7 +333,9 @@ async def _search_single_item(
             found = False
             for pref in match.preferred_products:
                 if pref.product_url:
-                    result = await worker.check_product_by_url(pref.product_url)
+                    result = await worker.check_product_by_url_fast(pref.product_url)
+                    if result is None:
+                        result = await worker.check_product_by_url(pref.product_url)
                 else:
                     results = await worker.search_product(pref.product_name)
                     result = results[0] if results else None
@@ -658,7 +660,9 @@ async def fetch_product_url(
         agent = InstacartAgent(headless=True)
 
     try:
-        result = await agent.check_product_by_url(url)
+        result = await agent.check_product_by_url_fast(url)
+        if result is None:
+            result = await agent.check_product_by_url(url)
         if result:
             return HTMLResponse(
                 f'<script>'

@@ -8,6 +8,7 @@ Uses browser-use to:
 """
 
 import asyncio
+import json as _json
 import logging
 import re
 from dataclasses import dataclass
@@ -26,6 +27,102 @@ DISMISS_MODALS = (
     "just click the rightmost star (5 stars) and submit. "
     "Dismiss any other popups or modals before proceeding with the task."
 )
+
+# JavaScript snippet for fast product page extraction (no LLM call needed).
+# Returns JSON with product name, brand, price, stock status, image URL.
+_JS_EXTRACT_PRODUCT = """
+(function() {
+    // 404 / unavailable detection
+    var title = document.title || '';
+    var bodyText = document.body ? document.body.innerText : '';
+    if (/404|not found/i.test(title)
+        || /isn't available|is no longer available|page not found/i.test(bodyText.slice(0, 500))) {
+        return JSON.stringify({status: 'not_found'});
+    }
+
+    // Product name from h1
+    var h1 = document.querySelector('h1');
+    var product_name = h1 ? h1.textContent.trim() : '';
+    if (!product_name) {
+        return JSON.stringify({status: 'no_name'});
+    }
+
+    // Brand from "Shop all X" link
+    var brand = '';
+    var links = document.querySelectorAll('a');
+    for (var i = 0; i < links.length; i++) {
+        var lt = (links[i].textContent || '').trim();
+        var m = lt.match(/^Shop all\\s+(.+)/i);
+        if (m) { brand = m[1].trim(); break; }
+    }
+
+    // Price: first $X.XX in short text spans/divs near the top
+    var price = '';
+    var candidates = document.querySelectorAll('span, div, p');
+    for (var i = 0; i < candidates.length && i < 200; i++) {
+        var ct = (candidates[i].textContent || '').trim();
+        if (ct.length > 30) continue;
+        var pm = ct.match(/\\$\\d+\\.\\d{2}/);
+        if (pm) { price = pm[0]; break; }
+    }
+
+    // Stock status: look for "Add to cart" button or out-of-stock text
+    var in_stock = false;
+    var btns = document.querySelectorAll('button, [role="button"]');
+    for (var i = 0; i < btns.length; i++) {
+        var bt = (btns[i].textContent || '').trim().toLowerCase();
+        if (bt === 'add to cart' || bt === 'add' || /\\d+\\s*in\\s*cart/i.test(bt)) {
+            in_stock = true;
+            break;
+        }
+    }
+    if (!in_stock) {
+        // Check if "out of stock" is mentioned
+        var oos = /out of stock|unavailable|sold out/i.test(bodyText.slice(0, 3000));
+        in_stock = !oos;
+    }
+
+    // Product image: CDN images (same logic as _extract_product_page_image)
+    var image_url = '';
+    var imgs = document.querySelectorAll('img');
+    var imgCandidates = [];
+    for (var i = 0; i < imgs.length; i++) {
+        var src = imgs[i].src || '';
+        if ((src.indexOf('instacartassets') !== -1
+             || src.indexOf('product-image') !== -1
+             || src.indexOf('/image-server/') !== -1)
+            && imgs[i].naturalWidth > 50
+            && imgs[i].naturalHeight > 50) {
+            imgCandidates.push({src: src, area: imgs[i].naturalWidth * imgs[i].naturalHeight});
+        }
+    }
+    if (imgCandidates.length) {
+        imgCandidates.sort(function(a, b) { return b.area - a.area; });
+        image_url = imgCandidates[0].src;
+    } else {
+        // Fallback: largest image on page
+        var allImgs = [];
+        for (var i = 0; i < imgs.length; i++) {
+            if (imgs[i].naturalWidth >= 100 && imgs[i].naturalHeight >= 100) {
+                allImgs.push({src: imgs[i].src, area: imgs[i].naturalWidth * imgs[i].naturalHeight});
+            }
+        }
+        if (allImgs.length) {
+            allImgs.sort(function(a, b) { return b.area - a.area; });
+            image_url = allImgs[0].src;
+        }
+    }
+
+    return JSON.stringify({
+        status: 'ok',
+        product_name: product_name,
+        brand: brand,
+        price: price,
+        in_stock: in_stock,
+        image_url: image_url
+    });
+})()
+"""
 
 
 @dataclass
@@ -395,6 +492,68 @@ class InstacartAgent:
 
         except Exception as e:
             logger.warning("Image backfill failed (non-critical): %s", e)
+
+    async def check_product_by_url_fast(self, product_url: str) -> ProductResult | None:
+        """
+        Fast product page extraction via JavaScript (no LLM call).
+
+        Navigates to the product URL and extracts name/brand/price/stock/image
+        using a single CDP Runtime.evaluate call. Returns None on any failure
+        so the caller can fall back to the LLM-based check_product_by_url().
+
+        Leaves the browser on the product page so click_add_to_cart_on_current_page()
+        still works.
+        """
+        try:
+            # Normalize URL
+            if product_url.startswith("/"):
+                product_url = INSTACART_BASE + product_url
+            product_url = self._fix_store_in_url(product_url)
+
+            session = await self._ensure_started()
+            await session.navigate_to(product_url)
+            await asyncio.sleep(1.5)  # Wait for React hydration
+
+            raw = await self._run_js(_JS_EXTRACT_PRODUCT)
+            if not raw:
+                logger.debug("Fast extract: empty JS result for %s", product_url)
+                return None
+
+            data = _json.loads(raw)
+            status = data.get("status", "")
+
+            if status == "not_found":
+                logger.info("Fast extract: 404/unavailable for %s", product_url)
+                return None
+
+            if status != "ok" or not data.get("product_name"):
+                logger.debug("Fast extract: no product name for %s (status=%s)", product_url, status)
+                return None
+
+            # Verify store matches
+            current_url = await self._run_js("window.location.href")
+            url_store = self._extract_store_from_url(current_url)
+            configured = settings.instacart_store.lower()
+            if url_store and url_store != configured:
+                logger.warning("Fast extract: wrong store '%s' (expected '%s') for %s",
+                               url_store, configured, product_url)
+                return None
+
+            result = ProductResult(
+                product_name=data["product_name"],
+                product_url=product_url,
+                brand=data.get("brand") or None,
+                price=data.get("price") or None,
+                image_url=data.get("image_url") or None,
+                in_stock=data.get("in_stock", True),
+            )
+            logger.info("Fast extract OK: '%s' price=%s in_stock=%s",
+                        result.product_name, result.price, result.in_stock)
+            return result
+
+        except Exception as e:
+            logger.debug("Fast extract failed for %s: %s", product_url, e)
+            return None
 
     async def check_product_by_url(self, product_url: str) -> ProductResult | None:
         """

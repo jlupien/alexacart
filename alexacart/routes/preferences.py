@@ -140,7 +140,9 @@ async def add_product_from_url(
 
     agent = InstacartAgent(headless=True)
     try:
-        result = await agent.check_product_by_url(url)
+        result = await agent.check_product_by_url_fast(url)
+        if result is None:
+            result = await agent.check_product_by_url(url)
         if not result:
             return HTMLResponse(
                 _render_item(request, item, url_error="Could not find a product at that URL.")

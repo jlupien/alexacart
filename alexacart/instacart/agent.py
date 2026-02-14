@@ -202,23 +202,6 @@ class InstacartAgent:
             url = re.sub(r'/store/[^/]+/', f'/store/{configured}/', url)
         return url
 
-    async def _verify_store_after_navigation(self, original_url: str) -> bool:
-        """Check the current page URL to verify we're on the configured store."""
-        try:
-            current_url = await self._run_js("window.location.href")
-            page_store = self._extract_store_from_url(current_url)
-            if page_store:
-                configured = settings.instacart_store.lower()
-                if page_store != configured:
-                    logger.warning(
-                        "Wrong store after navigation: expected '%s', page shows '%s' (URL: %s → %s)",
-                        configured, page_store, original_url, current_url,
-                    )
-                    return False
-        except Exception as e:
-            logger.debug("Store verification JS failed (non-critical): %s", e)
-        return True
-
     async def _restart_as(self, headless: bool):
         """Stop current session and restart with a different headless mode."""
         if self._session:
@@ -423,18 +406,14 @@ class InstacartAgent:
             product_url = INSTACART_BASE + product_url
 
         product_url = self._fix_store_in_url(product_url)
-
-        session = await self._ensure_started()
-        await session.navigate_to(product_url)
-        await asyncio.sleep(2)
-        if not await self._verify_store_after_navigation(product_url):
-            return None
+        store = settings.instacart_store
 
         task = (
             f"Go to {product_url} . "
             f"This is an Instacart product page. "
             f"Extract: the full product name, brand, and price. "
             f"Do NOT extract image URLs — skip them entirely. "
+            f"Also verify this product is from the {store} store. If the page shows a different store, say 'WRONG STORE'. "
             f"Also check whether it is in stock (look for 'Add to cart' button vs 'out of stock' or '404' page). "
             f"If the page shows a 404 error or the product doesn't exist, say 'NOT FOUND'. "
             f"If the product is out of stock, say 'OUT OF STOCK' along with the product details. "
@@ -445,6 +424,9 @@ class InstacartAgent:
             history = await self._run_agent(task, max_steps=10)
             raw = history.final_result()
             raw_str = str(raw or "")
+            if "WRONG STORE" in raw_str.upper():
+                logger.warning("Agent detected wrong store for URL: %s", product_url)
+                return None
             if "NOT FOUND" in raw_str.upper() or "404" in raw_str:
                 return None
             results = self._parse_search_results(raw)
@@ -526,16 +508,13 @@ class InstacartAgent:
             product_url = INSTACART_BASE + product_url
 
         product_url = self._fix_store_in_url(product_url)
-
-        session = await self._ensure_started()
-        await session.navigate_to(product_url)
-        await asyncio.sleep(2)
-        if not await self._verify_store_after_navigation(product_url):
-            return False
+        store = settings.instacart_store
 
         task = (
             f"Go to {product_url} . "
             f"This is an Instacart product page. "
+            f"IMPORTANT: Before clicking 'Add to cart', verify this product is from the {store} store. "
+            f"If the page shows a different store name, say 'WRONG STORE' instead of adding the item. "
             f"First, check if this product is already in your cart — look for a quantity "
             f"counter or '1 in cart' indicator instead of an 'Add to cart' button. "
             f"If the product is already in the cart, do NOT add it again — just say 'SUCCESS'. "
@@ -549,6 +528,9 @@ class InstacartAgent:
         try:
             history = await self._run_agent(task, max_steps=15)
             raw = str(history.final_result() or "")
+            if "WRONG STORE" in raw.upper():
+                logger.warning("Agent detected wrong store for URL: %s", product_url)
+                return False
             success = "SUCCESS" in raw.upper() and "FAILED" not in raw.upper()
             if success:
                 logger.info("Added product to Instacart cart via URL: %s", product_url)

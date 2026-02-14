@@ -47,7 +47,7 @@
         <tbody>
             {% for entry in entries %}
             <tr>
-                <td>{{ entry.alexa_text }}</td>
+                <td><a href="https://www.instacart.com/store/{{ instacart_store }}/search/{{ entry.alexa_text | urlencode }}" target="_blank">{{ entry.alexa_text }}</a></td>
                 <td class="muted">{{ entry.proposed_product or "—" }}</td>
                 <td>{{ entry.final_product or "—" }}</td>
                 <td>

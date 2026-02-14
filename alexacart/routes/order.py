@@ -863,32 +863,17 @@ async def commit_progress_stream(session_id: str):
                 _sessions.pop(session_id, None)
                 return
 
+            active = list(session.active_commits)
+
             if event_type == "skip":
                 _, idx, alexa_text, count, total = event
                 script = _row_update_script(idx, "badge-substituted", "&mdash; Skipped")
-                yield {"event": "progress", "data": _commit_progress_bar(count, total) + script}
+                yield {"event": "progress", "data": _commit_progress_bar(count, total, active) + script}
 
             elif event_type == "active":
                 _, idx, alexa_text, count, total = event
                 script = _row_update_script(idx, "badge-new commit-pulse", "Adding...")
-                pct = int(count / total * 100) if total > 0 else 0
-                active = list(session.active_commits)
-                progress = (
-                    f'<div class="progress-container">'
-                    f'<div class="progress-bar">'
-                    f'<div class="progress-fill" style="width: {pct}%"></div>'
-                    f"</div>"
-                    f'<p class="progress-text">'
-                    f"Added {count} of {total}"
-                    f"</p>"
-                )
-                if active:
-                    items_str = ", ".join(html_escape(a) for a in active[:4])
-                    if len(active) > 4:
-                        items_str += f" +{len(active) - 4} more"
-                    progress += f'<p class="progress-text">Adding: {items_str}...</p>'
-                progress += "</div>"
-                yield {"event": "progress", "data": progress + script}
+                yield {"event": "progress", "data": _commit_progress_bar(count, total, active) + script}
 
             elif event_type == "done":
                 _, idx, alexa_text, success, reason, count, total = event
@@ -901,7 +886,7 @@ async def commit_progress_stream(session_id: str):
                 else:
                     badge_html = f"&#10007; {html_escape(reason or 'Failed')}"
                     script = _row_update_script(idx, "badge-error", badge_html)
-                yield {"event": "progress", "data": _commit_progress_bar(count, total) + script}
+                yield {"event": "progress", "data": _commit_progress_bar(count, total, active) + script}
 
     return EventSourceResponse(generate())
 
@@ -918,17 +903,23 @@ def _row_update_script(idx: int, badge_class: str, badge_html: str, extra: str =
     )
 
 
-def _commit_progress_bar(count: int, total: int) -> str:
-    """Render the commit progress bar HTML."""
+def _commit_progress_bar(count: int, total: int, active_items: list[str] | None = None) -> str:
+    """Render the commit progress bar HTML, optionally showing active items."""
     pct = int(count / total * 100) if total > 0 else 0
-    return (
+    html = (
         f'<div class="progress-container">'
         f'<div class="progress-bar">'
         f'<div class="progress-fill" style="width: {pct}%"></div>'
         f"</div>"
         f'<p class="progress-text">Added {count} of {total}</p>'
-        f"</div>"
     )
+    if active_items:
+        items_str = ", ".join(html_escape(a) for a in active_items[:4])
+        if len(active_items) > 4:
+            items_str += f" +{len(active_items) - 4} more"
+        html += f'<p class="progress-text">Adding: {items_str}...</p>'
+    html += "</div>"
+    return html
 
 
 def _learn_from_result(
@@ -995,5 +986,9 @@ async def order_history(request: Request, db: Session = Depends(get_db)):
 
     return templates.TemplateResponse(
         "history.html",
-        {"request": request, "sessions": sessions},
+        {
+            "request": request,
+            "sessions": sessions,
+            "instacart_store": settings.instacart_store.lower(),
+        },
     )

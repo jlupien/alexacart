@@ -1,13 +1,14 @@
 """
 Alexa cookie-based authentication.
 
-Cookies are extracted automatically from the browser-use persistent Chrome
-session during the order flow (ensure_amazon_logged_in → get_amazon_cookies).
+Amazon's bot detection flags browser-use/Playwright sessions and issues
+limited-scope session tokens that can't access the Shopping List API.
+We use nodriver (undetectable Chrome) for Amazon login + cookie extraction.
 
 On-demand refresh: called automatically when cookies expire (401 from Alexa API).
-Uses the Node.js alexa-cookie2 sidecar if available.
 """
 
+import asyncio
 import json
 import logging
 import subprocess
@@ -90,6 +91,104 @@ def try_refresh_via_sidecar() -> dict | None:
         logger.warning("Cookie refresh sidecar error: %s", e)
 
     return None
+
+
+async def extract_cookies_via_nodriver(on_status=None) -> dict:
+    """
+    Open an undetectable Chrome instance via nodriver, ensure the user is
+    logged into Amazon, and extract session cookies.
+
+    nodriver bypasses Amazon's bot detection that flags browser-use/Playwright
+    sessions and limits their API access.
+
+    Args:
+        on_status: Optional callback(str) for progress messages.
+
+    Returns cookie data dict with 'cookies' key.
+    """
+    import nodriver as uc
+
+    def _status(msg):
+        logger.info(msg)
+        if on_status:
+            on_status(msg)
+
+    profile_dir = settings.resolved_data_dir / "nodriver-amazon"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    _status("Opening browser for Amazon login...")
+    browser = await uc.start(
+        user_data_dir=str(profile_dir),
+        headless=False,
+    )
+
+    try:
+        page = await browser.get("https://www.amazon.com")
+        await page.sleep(2)
+
+        # Check if already logged in by looking for the account nav
+        logged_in = False
+        try:
+            el = await page.query_selector("#nav-link-accountList")
+            if el:
+                text = el.text or ""
+                if "sign in" not in text.lower():
+                    logged_in = True
+        except Exception:
+            pass
+
+        if logged_in:
+            _status("Already logged into Amazon")
+        else:
+            _status("Waiting for Amazon login — please log in via the browser window...")
+            # Poll until logged in (up to 5 minutes)
+            for _ in range(100):
+                await page.sleep(3)
+                try:
+                    el = await page.query_selector("#nav-link-accountList")
+                    if el:
+                        text = el.text or ""
+                        if "sign in" not in text.lower():
+                            logged_in = True
+                            break
+                except Exception:
+                    pass
+                # Also check if we're on the main page (redirected after login)
+                try:
+                    if "amazon.com" in page.url and "/ap/" not in page.url:
+                        el = await page.query_selector("#nav-link-accountList")
+                        if el and "sign in" not in (el.text or "").lower():
+                            logged_in = True
+                            break
+                except Exception:
+                    pass
+
+            if not logged_in:
+                raise RuntimeError("Timed out waiting for Amazon login")
+
+        _status("Extracting Amazon cookies...")
+        all_cookies = await browser.cookies.get_all()
+
+        cookies = {}
+        for c in all_cookies:
+            domain = getattr(c, "domain", "") or ""
+            name = getattr(c, "name", "") or ""
+            value = getattr(c, "value", "") or ""
+            if "amazon" in domain and name and value:
+                cookies[name] = value
+
+        logger.info("Extracted %d Amazon cookies via nodriver", len(cookies))
+        logger.info("Cookie names: %s", sorted(cookies.keys()))
+
+        result = {"cookies": cookies, "source": "nodriver"}
+        save_cookies(result)
+        return result
+
+    finally:
+        try:
+            browser.stop()
+        except Exception:
+            pass
 
 
 async def ensure_valid_cookies() -> dict:

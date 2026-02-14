@@ -157,12 +157,15 @@ class InstacartAgent:
         )
         return await agent.run(max_steps=max_steps)
 
-    async def _run_js(self, js_code: str) -> str:
+    async def _run_js(self, js_code: str, await_promise: bool = False) -> str:
         """Run JavaScript on the current page and return the string result."""
         session = await self._get_session()
         cdp_session = await session.get_or_create_cdp_session(target_id=None)
+        params = {"expression": js_code, "returnByValue": True}
+        if await_promise:
+            params["awaitPromise"] = True
         resp = await cdp_session.cdp_client.send.Runtime.evaluate(
-            params={"expression": js_code, "returnByValue": True},
+            params=params,
             session_id=cdp_session.session_id,
         )
         return str(resp.get("result", {}).get("value", ""))
@@ -282,85 +285,6 @@ class InstacartAgent:
             check_js,
             poll_js,
         )
-
-    async def ensure_amazon_logged_in(self) -> bool:
-        """Check if logged into Amazon via fast JS check."""
-        check_js = """
-            (function() {
-                var el = document.getElementById('nav-link-accountList');
-                if (!el) return 'NEEDS_LOGIN';
-                var text = el.innerText || el.textContent || '';
-                if (/sign in/i.test(text)) return 'NEEDS_LOGIN';
-                return 'LOGGED_IN';
-            })()
-        """
-        # Poll using the same DOM check — URL-based polling is unreliable
-        # because the sign-in URL can 404 or change across redirects.
-        # On sign-in pages (no #nav-link-accountList), returns NEEDS_LOGIN.
-        # After login redirect back to amazon.com, detects LOGGED_IN.
-        poll_js = check_js
-        return await self._ensure_service_logged_in(
-            "Amazon",
-            "https://www.amazon.com",
-            "https://www.amazon.com",
-            check_js,
-            poll_js,
-        )
-
-    async def ensure_amazon_logged_in_and_get_cookies(self) -> dict | None:
-        """
-        Check Amazon login, then navigate to alexa.amazon.com to establish
-        Alexa session cookies and extract them — all in one flow.
-        Returns cookie data dict on success, None if login failed.
-        """
-        ok = await self.ensure_amazon_logged_in()
-        if not ok:
-            return None
-        return await self.get_amazon_cookies()
-
-    async def get_amazon_cookies(self) -> dict:
-        """
-        Extract Amazon cookies from the persistent browser session.
-        Navigates to alexa.amazon.com first to establish Alexa session cookies
-        (csrf token, etc.) which are separate from www.amazon.com cookies.
-        Returns cookie data in the format expected by AlexaClient.
-        """
-        session = await self._ensure_started()
-
-        # Visit alexa.amazon.com to establish Alexa session cookies (csrf, etc.)
-        # These are on a different domain than www.amazon.com and won't exist
-        # unless the browser actually visits the Alexa subdomain.
-        # The SPA sets the csrf cookie via JavaScript, so we poll for it rather
-        # than using a fixed sleep — page load times vary widely.
-        try:
-            await session.navigate_to("https://alexa.amazon.com/spa/index.html")
-            all_cookies = None
-            for _ in range(15):
-                await asyncio.sleep(1)
-                all_cookies = await session._cdp_get_cookies()
-                if any(
-                    c.get("name") == "csrf" and "amazon" in c.get("domain", "")
-                    for c in all_cookies
-                ):
-                    logger.info("Alexa csrf cookie found")
-                    break
-            else:
-                logger.warning("Alexa csrf cookie not found after 15s — extracting available cookies")
-        except Exception as e:
-            logger.warning("Failed to navigate to alexa.amazon.com: %s", e)
-            all_cookies = None
-
-        if all_cookies is None:
-            all_cookies = await session._cdp_get_cookies()
-
-        cookies = {}
-        for cookie in all_cookies:
-            domain = cookie.get("domain", "")
-            if "amazon" in domain:
-                cookies[cookie["name"]] = cookie["value"]
-
-        logger.info("Extracted %d Amazon cookies from browser session", len(cookies))
-        return {"cookies": cookies, "source": "browser_session"}
 
     async def search_product(self, query: str, store: str | None = None) -> list[ProductResult]:
         """Search Instacart for a product and return top results."""
@@ -768,23 +692,23 @@ class BrowserPool:
     """
 
     def __init__(self, size: int):
-        self._size = max(size, 2)
+        self._size = max(size, 1)
         self._agents: list[InstacartAgent] = []
         self._queue: asyncio.Queue[InstacartAgent] = asyncio.Queue()
         self._closed = False
-        # Index of the Amazon auth agent (for cookie refresh)
-        self._amazon_agent_idx = 0
 
-    async def start_with_auth(self, on_status=None) -> tuple[bool, bool, dict | None]:
+    async def start_with_auth(self, on_status=None) -> bool:
         """
-        Start the pool with parallel auth:
-        1. Create 2 headless browsers (pool-0=Amazon, pool-1=Instacart)
-        2. Start N-2 headless workers in the background
-        3. Run Amazon + Instacart auth in parallel
-        4. Inject Instacart cookies from pool-1 into all other agents
+        Start the pool with Instacart auth:
+        1. Create 1 headless Instacart auth browser
+        2. Start N-1 headless workers in the background
+        3. Run Instacart auth (visible window only if login is needed)
+        4. Inject Instacart cookies into all workers
         5. Populate the work queue
 
-        Returns (amazon_ok, instacart_ok, cookie_data).
+        Amazon auth is handled separately via nodriver (see auth.py).
+
+        Returns instacart_ok.
         on_status: optional callback(str) for progress messages.
         """
         def _status(msg):
@@ -792,51 +716,30 @@ class BrowserPool:
                 on_status(msg)
 
         # Debug: wipe browser profile cookies to force re-login
-        if settings.debug_clear_amazon_cookies:
-            self._clear_profile_cookies(settings.resolved_data_dir / "browser-profile-pool-0")
         if settings.debug_clear_instacart_cookies:
             self._clear_profile_cookies(settings.resolved_data_dir / "browser-profile")
 
-        _status("Checking logins...")
+        _status("Checking Instacart login...")
 
-        # Create the two auth agents (headless — a visible window only opens if login is needed)
-        # pool-0 (Amazon auth) gets its own profile for Amazon cookies
-        # pool-1 (Instacart auth) uses the default profile to preserve existing cookies
-        amazon_agent = InstacartAgent(profile_suffix="pool-0", headless=True, on_status=on_status)
+        # Instacart auth agent uses the default profile to preserve existing cookies
         instacart_agent = InstacartAgent(headless=True, on_status=on_status)
-        self._agents = [amazon_agent, instacart_agent]
+        self._agents = [instacart_agent]
 
         # Start headless workers in background
-        worker_count = self._size - 2
+        worker_count = self._size - 1
         worker_task = None
         if worker_count > 0:
             worker_task = asyncio.create_task(self._start_workers(worker_count))
 
-        # Run auth in parallel
-        amazon_result, instacart_result = await asyncio.gather(
-            amazon_agent.ensure_amazon_logged_in_and_get_cookies(),
-            instacart_agent.ensure_logged_in(),
-            return_exceptions=True,
-        )
-
-        # Process Amazon result
-        amazon_ok = False
-        cookie_data = None
-        if isinstance(amazon_result, Exception):
-            logger.error("Amazon auth failed: %s", amazon_result)
-        elif amazon_result is not None:
-            amazon_ok = True
-            cookie_data = amazon_result
-
-        # Process Instacart result
-        instacart_ok = False
-        if isinstance(instacart_result, Exception):
-            logger.error("Instacart auth failed: %s", instacart_result)
-        elif instacart_result:
-            instacart_ok = True
+        # Run Instacart auth
+        try:
+            instacart_ok = await instacart_agent.ensure_logged_in()
+        except Exception as e:
+            logger.error("Instacart auth failed: %s", e)
+            return False
 
         if not instacart_ok:
-            return amazon_ok, instacart_ok, cookie_data
+            return False
 
         # Wait for workers to finish starting
         if worker_task:
@@ -846,18 +749,17 @@ class BrowserPool:
             except Exception as e:
                 logger.warning("Worker startup had errors: %s", e)
 
-        # Extract Instacart cookies from pool-1 and inject into all others
+        # Extract Instacart cookies and inject into all workers
         _status("Preparing browsers...")
         try:
             ic_cookies = await instacart_agent.extract_all_cookies()
-            inject_tasks = []
-            for i, agent in enumerate(self._agents):
-                if i == 1:  # Skip pool-1 (already has cookies)
-                    continue
-                inject_tasks.append(agent.inject_cookies(ic_cookies))
+            inject_tasks = [
+                agent.inject_cookies(ic_cookies)
+                for agent in self._agents[1:]  # Skip auth agent (already has cookies)
+            ]
             if inject_tasks:
                 results = await asyncio.gather(*inject_tasks, return_exceptions=True)
-                for i, r in enumerate(results):
+                for r in results:
                     if isinstance(r, Exception):
                         logger.warning("Cookie injection failed for agent: %s", r)
         except Exception as e:
@@ -868,10 +770,10 @@ class BrowserPool:
             self._queue.put_nowait(agent)
 
         logger.info(
-            "BrowserPool started: %d agents (%d auth + %d workers)",
-            len(self._agents), 2, len(self._agents) - 2,
+            "BrowserPool started: %d agents (1 auth + %d workers)",
+            len(self._agents), len(self._agents) - 1,
         )
-        return amazon_ok, instacart_ok, cookie_data
+        return True
 
     @staticmethod
     def _clear_profile_cookies(profile_dir):
@@ -897,7 +799,7 @@ class BrowserPool:
         """Start headless worker agents and add them to self._agents."""
 
         async def _make_worker(i: int) -> InstacartAgent:
-            agent = InstacartAgent(profile_suffix=f"pool-{i + 2}", headless=True)
+            agent = InstacartAgent(profile_suffix=f"pool-{i + 1}", headless=True)
             await agent._ensure_started()
             return agent
 
@@ -919,11 +821,6 @@ class BrowserPool:
         """Return an agent to the pool."""
         if not self._closed:
             self._queue.put_nowait(agent)
-
-    async def refresh_amazon_cookies(self) -> dict:
-        """Get fresh Amazon cookies using the Amazon auth agent."""
-        agent = self._agents[self._amazon_agent_idx]
-        return await agent.get_amazon_cookies()
 
     async def close(self):
         """Close all browser sessions in the pool."""

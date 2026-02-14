@@ -11,7 +11,6 @@ class Settings(BaseSettings):
     instacart_store: str = "Wegmans"
     search_concurrency: int = 4
     skip_alexa_checkoff: bool = False
-    debug_clear_amazon_cookies: bool = False
     debug_clear_instacart_cookies: bool = False
     data_dir: str = ""
 

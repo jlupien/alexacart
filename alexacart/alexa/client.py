@@ -1,15 +1,18 @@
 """
 Alexa Shopping List API client.
 
-Uses undocumented Amazon Alexa v2 API endpoints:
-- POST /alexashoppinglists/api/v2/lists/fetch — list all shopping lists
-- POST /alexashoppinglists/api/v2/lists/{listId}/items/fetch — get items
-- PUT  /alexashoppinglists/api/v2/lists/{listId}/items/{itemId}?version=N — update item
+Uses undocumented Amazon Alexa API endpoints (mobile app webview API):
+- GET  /alexashoppinglists/api/getlistitems — get all shopping list items
+- PUT  /alexashoppinglists/api/updatelistitem — update an item (e.g. mark complete)
+
+These endpoints are accessed using the Alexa mobile app's User-Agent
+(PitanguiBridge) which routes to the still-active mobile API backend.
+The older v2 API (used by the now-defunct alexa.amazon.com SPA) returns 401.
 """
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -18,34 +21,34 @@ from alexacart.config import settings
 
 logger = logging.getLogger(__name__)
 
-API_BASE = "https://www.amazon.com/alexashoppinglists/api/v2"
+API_BASE = "https://www.amazon.com/alexashoppinglists/api"
 
+# Mimic the Alexa mobile app's webview (PitanguiBridge).
+# Amazon routes requests to different backends based on User-Agent;
+# the desktop browser UA hits the deprecated v2 backend while the
+# mobile app UA hits the still-active mobile backend.
 COMMON_HEADERS = {
-    "Content-Type": "application/json; charset=utf-8",
-    "Accept": "application/json; charset=utf-8",
-    "Accept-Language": "en-US",
     "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 13_5_1 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
+        "PitanguiBridge/2.2.345247.0-[HARDWARE=iPhone10_4][SOFTWARE=13.5.1]"
     ),
-    "Referer": "https://alexa.amazon.com/spa/index.html",
-    "Origin": "https://alexa.amazon.com",
+    "Accept": "*/*",
+    "Accept-Language": "*",
+    "DNT": "1",
+    "Upgrade-Insecure-Requests": "1",
 }
-
-
-def _extract_csrf(cookie_data: dict) -> str:
-    """Extract CSRF token from cookies (it's stored as a cookie named 'csrf')."""
-    cookies = cookie_data.get("cookies", {})
-    return cookies.get("csrf", "")
 
 
 @dataclass
 class AlexaListItem:
     item_id: str
     text: str
-    list_id: str
+    list_id: str = ""
     version: int = 1
     completed: bool = False
+    # Store the raw item dict from the API so we can send it back for updates
+    _raw: dict = field(default_factory=dict, repr=False)
 
 
 class AlexaClient:
@@ -63,10 +66,12 @@ class AlexaClient:
         if self._client is None or self._cookies is None:
             cookie_data = await ensure_valid_cookies()
             self._cookies = cookie_data
-            csrf = _extract_csrf(cookie_data)
             headers = {**COMMON_HEADERS, **get_cookie_header(cookie_data)}
-            if csrf:
-                headers["csrf"] = csrf
+            cookie_count = len(cookie_data.get("cookies", {}))
+            logger.info(
+                "AlexaClient initialized (cookies=%d, source=%s)",
+                cookie_count, cookie_data.get("source", "disk"),
+            )
             self._client = httpx.AsyncClient(headers=headers, timeout=30.0)
         return self._client
 
@@ -79,7 +84,26 @@ class AlexaClient:
         max_retries = 3
 
         for attempt in range(max_retries + 1):
+            if attempt == 0:
+                # Log headers on first attempt (truncate cookie values)
+                debug_headers = {}
+                for k, v in client.headers.items():
+                    if k.lower() == "cookie":
+                        parts = v.split("; ")
+                        debug_headers[k] = "; ".join(
+                            p.split("=")[0] + "=..." if "=" in p else p
+                            for p in parts
+                        )
+                    else:
+                        debug_headers[k] = v
+                logger.info("Alexa API request headers: %s", debug_headers)
+            logger.info("Alexa API request: %s %s (attempt %d)", method, url, attempt + 1)
             resp = await client.request(method, url, **kwargs)
+            logger.info("Alexa API response: %d for %s %s", resp.status_code, method, url)
+
+            if resp.status_code not in (200, 204):
+                body = resp.text[:500] if resp.text else "(empty)"
+                logger.warning("Alexa API error body: %s", body)
 
             if resp.status_code == 401:
                 logger.info("Got 401, attempting cookie refresh...")
@@ -101,16 +125,20 @@ class AlexaClient:
 
                 if refreshed:
                     self._cookies = refreshed
-                    csrf = _extract_csrf(refreshed)
                     headers = {**COMMON_HEADERS, **get_cookie_header(refreshed)}
-                    if csrf:
-                        headers["csrf"] = csrf
                     old_client = self._client
                     self._client = httpx.AsyncClient(headers=headers, timeout=30.0)
                     client = self._client
                     if old_client:
                         await old_client.aclose()
+                    logger.info("Retrying request after cookie refresh...")
                     resp = await client.request(method, url, **kwargs)
+                    logger.info("Post-refresh response: %d for %s %s", resp.status_code, method, url)
+                    if resp.status_code not in (200, 204):
+                        body = resp.text[:500] if resp.text else "(empty)"
+                        logger.warning("Post-refresh error body: %s", body)
+                else:
+                    logger.warning("No cookie refresh available — returning 401 as-is")
                 return resp
 
             if resp.status_code in retryable_statuses and attempt < max_retries:
@@ -126,64 +154,38 @@ class AlexaClient:
 
         return resp
 
-    async def get_lists(self) -> list[dict]:
-        """Fetch all Alexa shopping lists."""
-        resp = await self._request_with_retry(
-            "POST",
-            f"{API_BASE}/lists/fetch",
-            json={
-                "listAttributesToAggregate": [
-                    {"type": "totalActiveItemsCount"},
-                ],
-                "listOwnershipType": None,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("listInfoList", [])
-
-    async def find_list_id(self, list_name: str | None = None) -> str:
-        """Find the list ID for the configured list name."""
-        target = (list_name or settings.alexa_list_name).lower()
-        lists = await self.get_lists()
-
-        for lst in lists:
-            name = lst.get("listName", lst.get("name", "")).lower()
-            if name == target:
-                return lst.get("listId", lst.get("id", ""))
-
-        available = [lst.get("listName", lst.get("name", "")) for lst in lists]
-        raise ValueError(
-            f"List '{target}' not found. Available lists: {available}"
-        )
+    @staticmethod
+    def _extract_list_items(data: dict) -> list[dict]:
+        """Extract the list items from the API response (nested structure)."""
+        # The response contains a nested dict with a 'listItems' key
+        for key in data:
+            val = data[key]
+            if isinstance(val, dict) and "listItems" in val:
+                return val["listItems"]
+        # Fallback: try top-level listItems
+        if "listItems" in data:
+            return data["listItems"]
+        logger.warning("Could not find listItems in response keys: %s", list(data.keys()))
+        return []
 
     async def get_items(self, list_id: str | None = None) -> list[AlexaListItem]:
-        """Fetch active (uncompleted) items from the Alexa list."""
-        if list_id is None:
-            list_id = await self.find_list_id()
-
-        resp = await self._request_with_retry(
-            "POST",
-            f"{API_BASE}/lists/{list_id}/items/fetch?limit=100",
-            json={
-                "itemAttributesToProject": ["quantity", "note"],
-            },
-        )
+        """Fetch active (uncompleted) items from the Alexa shopping list."""
+        resp = await self._request_with_retry("GET", f"{API_BASE}/getlistitems")
         resp.raise_for_status()
         data = resp.json()
 
+        raw_items = self._extract_list_items(data)
+        logger.info("API returned %d total items", len(raw_items))
+
         items = []
-        raw_items = data.get("itemInfoList", [])
         for item in raw_items:
-            status = item.get("itemStatus", "ACTIVE")
-            if status == "ACTIVE":
+            if not item.get("completed", False):
                 items.append(
                     AlexaListItem(
-                        item_id=item.get("itemId", ""),
-                        text=item.get("itemName", ""),
-                        list_id=list_id,
-                        version=item.get("version", 1),
+                        item_id=item.get("id", ""),
+                        text=item.get("value", ""),
                         completed=False,
+                        _raw=item,
                     )
                 )
 
@@ -193,15 +195,22 @@ class AlexaClient:
     async def mark_complete(self, item: AlexaListItem) -> bool:
         """Mark an item as complete (checked off) on the Alexa list."""
         try:
+            # Build the update payload from the raw item data if available,
+            # otherwise construct a minimal one
+            if item._raw:
+                update_data = {**item._raw, "completed": True}
+            else:
+                update_data = {
+                    "id": item.item_id,
+                    "value": item.text,
+                    "completed": True,
+                    "type": "TASK",
+                }
+
             resp = await self._request_with_retry(
                 "PUT",
-                f"{API_BASE}/lists/{item.list_id}/items/{item.item_id}?version={item.version}",
-                json={
-                    "itemAttributesToUpdate": [
-                        {"type": "itemStatus", "value": "COMPLETE"},
-                    ],
-                    "itemAttributesToRemove": [],
-                },
+                f"{API_BASE}/updatelistitem",
+                json=update_data,
             )
             if resp.status_code in (200, 204):
                 logger.info("Marked '%s' as complete on Alexa list", item.text)
@@ -211,7 +220,7 @@ class AlexaClient:
                     "Failed to mark '%s' as complete: %s %s",
                     item.text,
                     resp.status_code,
-                    resp.text,
+                    resp.text[:200],
                 )
                 return False
         except Exception as e:

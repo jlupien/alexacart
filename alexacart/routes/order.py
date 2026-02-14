@@ -123,7 +123,7 @@ async def start_order(request: Request):
 
 async def _run_order(session: OrderSession):
     """Background task: check logins, fetch Alexa list, then search Instacart."""
-    from alexacart.alexa.auth import save_cookies
+    from alexacart.alexa.auth import extract_cookies_via_nodriver
     from alexacart.alexa.client import AlexaClient
     from alexacart.instacart.agent import BrowserPool
 
@@ -131,43 +131,56 @@ async def _run_order(session: OrderSession):
     session.browser_pool = pool
 
     try:
-        # Step 1: Parallel auth — headless check, visible browser only if login needed
+        # Step 1: Parallel auth — Instacart via browser-use, Amazon via nodriver.
+        # nodriver is used for Amazon because browser-use/Playwright sessions get
+        # flagged by Amazon's bot detection, resulting in limited-scope tokens
+        # that can't access the Shopping List API.
         session.status = "logging_in"
         session.status_detail = "Checking logins..."
 
-        amazon_ok, instacart_ok, cookie_data = await pool.start_with_auth(
-            on_status=lambda msg: setattr(session, "status_detail", msg),
+        on_status = lambda msg: setattr(session, "status_detail", msg)
+
+        instacart_result, amazon_result = await asyncio.gather(
+            pool.start_with_auth(on_status=on_status),
+            extract_cookies_via_nodriver(on_status=on_status),
+            return_exceptions=True,
         )
 
-        if not amazon_ok or not cookie_data:
-            session.error = "Timed out waiting for Amazon login. Please try again."
+        # Process Instacart result
+        if isinstance(instacart_result, Exception):
+            logger.error("Instacart auth failed: %s", instacart_result, exc_info=True)
+            session.error = f"Instacart login failed: {instacart_result}"
             session.status = "error"
             return
-
-        if not instacart_ok:
+        if not instacart_result:
             session.error = "Timed out waiting for Instacart login. Please try again."
             session.status = "error"
             return
 
-        # Step 2: Save cookies and fetch Alexa list
-        session.status = "fetching_list"
-        if not cookie_data.get("cookies"):
-            session.error = "Could not extract Amazon cookies from browser. Please try again."
+        # Process Amazon/nodriver result
+        if isinstance(amazon_result, Exception):
+            logger.error("nodriver cookie extraction failed: %s", amazon_result, exc_info=True)
+            session.error = f"Amazon authentication failed: {amazon_result}"
             session.status = "error"
             return
-        save_cookies(cookie_data)
+        cookie_data = amazon_result
+        if not cookie_data or not cookie_data.get("cookies"):
+            session.error = "Could not extract Amazon cookies. Please try again."
+            session.status = "error"
+            return
 
-        # Step 3: Fetch Alexa shopping list using fresh cookies
-        # Pass browser cookie refresh so 401s auto-recover
-        alexa_client = AlexaClient(cookie_refresh_fn=pool.refresh_amazon_cookies)
+        # Step 2: Fetch Alexa shopping list using nodriver cookies
+        session.status_detail = "Fetching your Alexa shopping list..."
+        alexa_client = AlexaClient(cookie_refresh_fn=lambda: extract_cookies_via_nodriver())
         try:
             items = await alexa_client.get_items()
         except Exception as e:
             error_str = str(e)
+            logger.error("Alexa list fetch failed: %s", error_str, exc_info=True)
             if "401" in error_str:
                 session.error = (
-                    "Alexa session cookies expired. "
-                    "Try visiting alexa.amazon.com in Chrome, then restart the order."
+                    "Amazon session not authorized for Shopping List API. "
+                    "Please log into amazon.com in the browser window and try again."
                 )
             elif "503" in error_str or "502" in error_str:
                 session.error = "Amazon servers are temporarily unavailable. Please try again in a minute."
@@ -716,6 +729,7 @@ async def _commit_single_item(
 
 async def _run_commit(session: OrderSession):
     """Background task: add items to Instacart cart and check off Alexa list — in parallel."""
+    from alexacart.alexa.auth import extract_cookies_via_nodriver
     from alexacart.alexa.client import AlexaClient
     from alexacart.instacart.agent import BrowserPool
 
@@ -727,7 +741,7 @@ async def _run_commit(session: OrderSession):
         session.browser_pool = pool
         await pool.start_with_auth()
 
-    alexa_client = AlexaClient(cookie_refresh_fn=pool.refresh_amazon_cookies)
+    alexa_client = AlexaClient(cookie_refresh_fn=lambda: extract_cookies_via_nodriver())
     q = session.commit_queue
     total = sum(1 for d in session.commit_items_data.values() if d.get("skip") != "1")
     commit_counter = [0]  # mutable counter shared across parallel tasks

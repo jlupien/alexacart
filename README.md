@@ -4,7 +4,7 @@ Automate your grocery ordering: read your Alexa shopping list, match items to In
 
 ## How It Works
 
-1. **Fetch** — Reads your Alexa "Grocery List" via Amazon's undocumented API
+1. **Fetch** — Reads your Alexa "Grocery List" via Amazon's mobile app API
 2. **Match** — Looks up each item in your preference database (aliases + ranked products)
 3. **Search** — Uses browser-use AI agent to find products on Instacart
 4. **Review** — Shows a table of proposed matches; you can accept or swap any item
@@ -67,7 +67,7 @@ Open http://127.0.0.1:8000 in your browser.
 ### Start an Order
 
 1. Click "Start Order" on the home page
-2. A Chrome window opens — log into Amazon and Instacart if prompted (first time only; sessions persist across runs)
+2. Chrome windows open — log into Amazon (via nodriver) and Instacart (via browser-use) if prompted (first time only; sessions persist across runs)
 3. The app fetches your Alexa list and searches Instacart for each item
 4. Review the proposed matches — pick alternatives or paste a custom Instacart URL
 5. Click "Add All to Cart" — live progress updates show each item being added to your cart and checked off the Alexa list
@@ -89,6 +89,7 @@ Visit `/order/history` to see past orders and which items were corrected. You ca
 - **FastAPI** + **Jinja2** + **htmx** — server-rendered UI with dynamic updates
 - **SQLite** via **SQLAlchemy** — preference database (aliases, ranked products, order log)
 - **browser-use** — AI-powered browser automation for Instacart
+- **nodriver** — undetectable Chrome automation for Amazon cookie extraction (bypasses bot detection that flags Playwright/browser-use sessions)
 - **SSE** — real-time progress updates during search and commit phases
 
 ## File Structure
@@ -102,7 +103,7 @@ alexacart/
 │   ├── db.py                 # SQLAlchemy setup
 │   ├── models.py             # ORM models
 │   ├── alexa/                # Amazon/Alexa integration
-│   │   ├── auth.py           # Cookie management
+│   │   ├── auth.py           # Cookie management (nodriver extraction)
 │   │   └── client.py         # Alexa list API client
 │   ├── instacart/
 │   │   └── agent.py          # browser-use agent

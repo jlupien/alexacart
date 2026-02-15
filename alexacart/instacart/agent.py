@@ -66,13 +66,15 @@ _JS_EXTRACT_PRODUCT = """
         if (pm) { price = pm[0]; break; }
     }
 
-    // Stock status: in-stock only if an "Add to cart" button (or "N in cart") exists.
-    // If no such button is found, assume out of stock — don't guess.
+    // Stock status: only true if the main product's "Add to cart" button exists
+    // and is enabled, or if it's already in cart ("N in cart").
+    // Do NOT match bare "Add" — that catches suggested-product buttons at page bottom.
     var in_stock = false;
     var btns = document.querySelectorAll('button, [role="button"]');
     for (var i = 0; i < btns.length; i++) {
         var bt = (btns[i].textContent || '').trim().toLowerCase();
-        if (bt === 'add to cart' || bt === 'add' || /\\d+\\s*in\\s*cart/i.test(bt)) {
+        if ((bt === 'add to cart' && !btns[i].disabled)
+            || /\\d+\\s*in\\s*cart/i.test(bt)) {
             in_stock = true;
             break;
         }

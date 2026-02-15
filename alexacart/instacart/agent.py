@@ -123,6 +123,110 @@ _JS_EXTRACT_PRODUCT = """
 """
 
 
+# JavaScript snippet for fast search results extraction (no LLM call needed).
+# Extracts product cards from search results page using the same selector as _backfill_images.
+# NOTE: Product name text lives OUTSIDE the <a> tag, so we walk up to the card container.
+_JS_EXTRACT_SEARCH_RESULTS = """
+(function() {
+    var links = document.querySelectorAll('a[role="button"][href*="/products/"]');
+    var results = [];
+    var seen = {};
+
+    for (var i = 0; i < links.length && results.length < 5; i++) {
+        var link = links[i];
+        var href = link.getAttribute('href') || '';
+        if (!href || seen[href]) continue;
+        seen[href] = true;
+
+        var url = href.startsWith('/') ? window.location.origin + href : href;
+
+        // Image from inside the link element
+        var img = link.querySelector('img');
+        var imageUrl = img ? (img.getAttribute('src') || '') : '';
+
+        // Walk up to the card container (product name is outside the <a> tag)
+        var container = link;
+        var linkTextLen = (link.innerText || '').length;
+        for (var k = 0; k < 5; k++) {
+            var parent = container.parentElement;
+            if (!parent || parent.tagName === 'BODY' || parent.tagName === 'HTML') break;
+            container = parent;
+            if (container.tagName === 'LI' || container.tagName === 'ARTICLE') break;
+            if ((container.innerText || '').length > linkTextLen + 40) break;
+        }
+
+        var text = (container.innerText || '').trim();
+        var lines = text.split('\\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+
+        // Extract price: first $X.XX pattern
+        var price = '';
+        for (var j = 0; j < lines.length; j++) {
+            var pm = lines[j].match(/\\$\\d+\\.\\d{2}/);
+            if (pm) { price = pm[0]; break; }
+        }
+
+        // Filter lines to find product name candidates
+        var skipRe = /^(Add|Add to cart|Remove|view|Likely|Out of stock|Store choice|Best seller|Buy it again|New|Sale|Popular|Sponsored|See all|Show more|In stock|Low stock|Final cost by weight|Price estimated|Snap|EBT eligible|Organic|Non-GMO)$/i;
+        var candidates = [];
+        for (var j = 0; j < lines.length; j++) {
+            var line = lines[j];
+            if (/^\\$/.test(line)) continue;
+            if (/\\$\\d+\\.\\d{2}/.test(line) && line.length < 30) continue;
+            if (skipRe.test(line)) continue;
+            if (/^\\d+(\\.\\d+)?\\s*(ct|oz|lb|ml|l|g|kg|pk|pt|qt|gal|fl oz|each)$/i.test(line)) continue;
+            if (line.length < 3) continue;
+            candidates.push(line);
+        }
+
+        // Product name: longest candidate (product names are descriptive, badges are short)
+        var name = '';
+        for (var j = 0; j < candidates.length; j++) {
+            if (candidates[j].length > name.length) {
+                name = candidates[j];
+            }
+        }
+
+        if (!name) continue;
+
+        // Size: first line matching a size pattern (e.g. "12 oz", "8 ct")
+        var sizeRe = /^\\d+(\\.\\d+)?\\s*(ct|oz|lb|ml|l|g|kg|pk|pt|qt|gal|fl oz|each)$/i;
+        var size = '';
+        for (var j = 0; j < lines.length; j++) {
+            if (sizeRe.test(lines[j])) {
+                size = lines[j];
+                break;
+            }
+        }
+
+        // Brand is not on search cards — backfilled from product pages separately
+        results.push({
+            product_name: name,
+            product_url: url,
+            price: price || null,
+            image_url: imageUrl || null,
+            size: size || null
+        });
+    }
+    return JSON.stringify(results);
+})()
+"""
+
+
+# JavaScript snippet for extracting brand from a product detail page.
+# Looks for "Shop all [brand]" link text (same pattern as _JS_EXTRACT_PRODUCT).
+_JS_EXTRACT_BRAND = """
+(function() {
+    var links = document.querySelectorAll('a');
+    for (var i = 0; i < links.length; i++) {
+        var lt = (links[i].textContent || '').trim();
+        var m = lt.match(/^Shop all\\s+(.+)/i);
+        if (m) return m[1].trim();
+    }
+    return '';
+})()
+"""
+
+
 @dataclass
 class ProductResult:
     product_name: str
@@ -404,10 +508,127 @@ class InstacartAgent:
             poll_js,
         )
 
+    async def _backfill_brands(self, results: list[ProductResult]) -> None:
+        """Visit each product page briefly to extract brand from 'Shop all [brand]' link.
+
+        Navigates to each product URL, polls for the brand link (up to 2s per
+        product), then moves on. Best-effort — failures are silently skipped.
+        """
+        to_fill = [r for r in results if not r.brand and r.product_url]
+        if not to_fill:
+            return
+
+        session = await self._get_session()
+        for result in to_fill:
+            try:
+                await session.navigate_to(result.product_url)
+                brand = ""
+                for _ in range(4):  # 4 × 0.5s = 2s max per product
+                    await asyncio.sleep(0.5)
+                    brand = await self._run_js(_JS_EXTRACT_BRAND)
+                    if brand:
+                        break
+                if brand:
+                    result.brand = brand
+            except Exception as e:
+                logger.debug("Brand backfill failed for '%s': %s", result.product_name, e)
+
+        logger.debug(
+            "Brand backfill: %d/%d results have brands",
+            sum(1 for r in results if r.brand), len(results),
+        )
+
+    async def _search_product_fast(self, query: str, store_name: str) -> list[ProductResult] | None:
+        """
+        Fast search extraction via JavaScript (no LLM call).
+
+        Navigates to the search URL, waits for product cards to appear, and
+        extracts results with a single JS snippet. Returns:
+        - list of ProductResult if extraction succeeded (may be empty for no results)
+        - None if the page didn't load properly (caller should fall back to LLM)
+        """
+        search_url = f"{INSTACART_BASE}/store/{store_name.lower()}/search/{quote(query)}"
+
+        session = await self._ensure_started()
+        await session.navigate_to(search_url)
+
+        # Poll for product cards to appear (up to 8s, checking every 0.5s)
+        poll_js = 'document.querySelectorAll(\'a[role="button"][href*="/products/"]\').length'
+        card_count = 0
+        for _ in range(16):  # 16 * 0.5s = 8s max
+            await asyncio.sleep(0.5)
+            try:
+                raw_count = await self._run_js(poll_js)
+                card_count = int(raw_count) if raw_count.strip().isdigit() else 0
+                if card_count > 0:
+                    # Cards found — brief buffer for remaining cards to render
+                    await asyncio.sleep(0.5)
+                    break
+            except Exception:
+                pass
+
+        if card_count == 0:
+            # Check if the page actually loaded (vs network error / blank page)
+            body_text = await self._run_js(
+                "(document.body && document.body.innerText || '').slice(0, 500)"
+            )
+            if len(body_text) > 100:
+                # Page loaded but no product cards — genuine "no results"
+                logger.info("JS search: no results for '%s' (page loaded, 0 cards)", query)
+                return []
+            else:
+                # Page didn't load — fall back to LLM
+                logger.debug("JS search: page didn't load for '%s' (body len=%d)", query, len(body_text))
+                return None
+
+        # Extract results
+        raw = await self._run_js(_JS_EXTRACT_SEARCH_RESULTS)
+        if not raw:
+            return None
+
+        try:
+            data = _json.loads(raw)
+        except _json.JSONDecodeError:
+            logger.debug("JS search: invalid JSON for '%s': %s", query, raw[:200])
+            return None
+
+        results = []
+        for item in data:
+            name = item.get("product_name", "")
+            size = item.get("size")
+            if size:
+                name = f"{name}, {size}"
+            results.append(ProductResult(
+                product_name=name,
+                product_url=item.get("product_url"),
+                brand=item.get("brand"),
+                price=item.get("price"),
+                image_url=item.get("image_url"),
+                in_stock=True,  # Search results generally show in-stock items
+            ))
+
+        logger.info("JS search extracted %d results for '%s'", len(results), query)
+        await self._backfill_brands(results)
+        return results
+
     async def search_product(self, query: str, store: str | None = None) -> list[ProductResult]:
-        """Search Instacart for a product and return top results."""
+        """Search Instacart for a product and return top results.
+
+        Tries a fast JS extraction first (no LLM call, ~5-8s). Falls back to the
+        LLM agent path if JS extraction fails (~30-80s).
+        """
         store_name = store or settings.instacart_store
 
+        # JS fast-path
+        try:
+            results = await self._search_product_fast(query, store_name)
+            if results is not None:  # None = extraction failed, [] = genuine no results
+                return results
+            logger.debug("JS search returned None, falling back to LLM for '%s'", query)
+        except Exception as e:
+            logger.debug("JS search failed for '%s': %s, falling back to LLM", query, e)
+
+        # LLM agent fallback
         task = (
             f"Go to {INSTACART_BASE}/store/{store_name.lower()}/search/{quote(query)} . "
             f"Wait for results to load, then use the extract tool ONCE to get the top 3 results. "

@@ -912,7 +912,11 @@ async def _run_commit(session: OrderSession):
 
         added_count = sum(1 for r in commit_results if r["success"] and not r.get("skipped"))
         skipped_count = sum(1 for r in commit_results if r.get("skipped"))
-        await q.put(("complete", added_count, skipped_count, len(commit_results)))
+        failed_count = sum(
+            1 for r in commit_results
+            if not r["success"] and not r.get("skipped")
+        )
+        await q.put(("complete", added_count, skipped_count, failed_count, len(commit_results)))
 
     except Exception as e:
         logger.exception("Error during commit")
@@ -955,7 +959,7 @@ async def commit_progress_stream(session_id: str):
             logger.info("Commit SSE: sending event type=%s", event_type)
 
             if event_type == "complete":
-                _, added_count, skipped_count, total_count = event
+                _, added_count, skipped_count, failed_count, total_count = event
                 auto_count = session.auto_committed_count
                 total_added = added_count + auto_count
                 total_all = total_count + auto_count
@@ -970,6 +974,8 @@ async def commit_progress_stream(session_id: str):
                     summary += f" ({auto_count} auto-added)"
                 if skipped_count:
                     summary += f", {skipped_count} skipped"
+                if failed_count:
+                    summary += f", {failed_count} failed"
                 summary += (
                     f"</p>"
                     f'<div style="display:flex;gap:0.75rem;justify-content:center">'

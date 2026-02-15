@@ -357,14 +357,16 @@ async def _search_single_item(
                             # Fast-path: click "Add to cart" on the already-loaded
                             # product page via JS (no navigation or LLM call)
                             added = await worker.click_add_to_cart_on_current_page()
-                            if not added:
+                            if not added and proposal.product_url:
                                 logger.warning(
-                                    "JS fast-path add-to-cart failed for '%s', falling back to LLM agent",
+                                    "JS fast-path add-to-cart failed for '%s', retrying by URL only",
                                     proposal.alexa_text,
                                 )
-                                added = await worker.add_to_cart(
-                                    proposal.product_name,
-                                    product_url=proposal.product_url or None,
+                                # Use add_to_cart_by_url (NOT add_to_cart) to avoid
+                                # the search-by-name fallback that lets the LLM pick
+                                # a substitute product without user approval.
+                                added = await worker.add_to_cart_by_url(
+                                    proposal.product_url,
                                 )
                         except Exception as add_err:
                             logger.warning(

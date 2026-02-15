@@ -733,12 +733,33 @@ class InstacartAgent:
     async def add_to_cart_by_url(self, product_url: str) -> bool:
         """
         Navigate directly to a product page and add it to the cart.
+        Tries JS fast-path first (navigate + JS click), falls back to LLM agent.
         Returns True if successful.
         """
         if product_url.startswith("/"):
             product_url = INSTACART_BASE + product_url
 
         product_url = self._fix_store_in_url(product_url)
+
+        # JS fast-path: navigate to the product page via CDP, verify it loaded,
+        # and click "Add to cart" with JavaScript — no LLM call needed (~5s vs ~17s).
+        try:
+            result = await self.check_product_by_url_fast(product_url)
+            if result and result.in_stock:
+                clicked = await self.click_add_to_cart_on_current_page()
+                if clicked:
+                    logger.info("Added product to Instacart cart via JS fast-path: %s", product_url)
+                    return True
+                logger.warning("JS fast-path click failed for %s, falling back to LLM agent", product_url)
+            elif result and not result.in_stock:
+                logger.info("Product out of stock (JS fast-path): %s", product_url)
+                return False
+            else:
+                logger.debug("JS fast-path extraction failed for %s, falling back to LLM agent", product_url)
+        except Exception as e:
+            logger.debug("JS fast-path error for %s: %s, falling back to LLM agent", product_url, e)
+
+        # LLM agent fallback
         store = settings.instacart_store
 
         task = (

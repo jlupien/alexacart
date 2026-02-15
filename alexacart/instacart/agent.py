@@ -66,14 +66,15 @@ _JS_EXTRACT_PRODUCT = """
         if (pm) { price = pm[0]; break; }
     }
 
-    // Stock status: only true if the main product's "Add to cart" button exists
-    // and is enabled, or if it's already in cart ("N in cart").
+    // Stock status: only true if the main product's "Add to cart" or "Request"
+    // button exists and is enabled, or if it's already in cart ("N in cart").
+    // "Request" appears for low-stock items — treat as in-stock.
     // Do NOT match bare "Add" — that catches suggested-product buttons at page bottom.
     var in_stock = false;
     var btns = document.querySelectorAll('button, [role="button"]');
     for (var i = 0; i < btns.length; i++) {
         var bt = (btns[i].textContent || '').trim().toLowerCase();
-        if ((bt === 'add to cart' && !btns[i].disabled)
+        if (((bt === 'add to cart' || bt === 'request') && !btns[i].disabled)
             || /\\d+\\s*in\\s*cart/i.test(bt)) {
             in_stock = true;
             break;
@@ -896,10 +897,10 @@ class InstacartAgent:
                     if (/\\d+\\s*in\\s*cart/i.test(t)) return 'ALREADY_IN_CART';
                 }
 
-                // Find and click "Add to cart" button
+                // Find and click "Add to cart" or "Request" button
                 for (var i = 0; i < elems.length; i++) {
                     var t = (elems[i].textContent || '').trim().toLowerCase();
-                    if ((t === 'add to cart' || t === 'add') && !elems[i].disabled) {
+                    if ((t === 'add to cart' || t === 'add' || t === 'request') && !elems[i].disabled) {
                         elems[i].click();
                         return 'CLICKED';
                     }
@@ -928,10 +929,10 @@ class InstacartAgent:
                             var t = (elems[i].textContent || '').trim();
                             if (/\\d+\\s*in\\s*cart/i.test(t)) return 'CONFIRMED';
                         }
-                        // If "Add to cart" button is gone, likely succeeded
+                        // If "Add to cart" / "Request" button is gone, likely succeeded
                         for (var i = 0; i < elems.length; i++) {
                             var t = (elems[i].textContent || '').trim().toLowerCase();
-                            if (t === 'add to cart' || t === 'add') return 'STILL_SHOWING';
+                            if (t === 'add to cart' || t === 'add' || t === 'request') return 'STILL_SHOWING';
                         }
                         return 'LIKELY_ADDED';
                     })()

@@ -13,17 +13,15 @@
     <div class="pref-section">
         <h4>Aliases</h4>
         <div class="alias-list">
-            {% for a in item.aliases %}
+            {% for a in item.aliases if a.alias != item.name %}
             <span class="alias-tag">
                 {{ a.alias }}
-                {% if a.alias != item.name %}
                 <button
                     class="alias-remove"
                     hx-delete="/preferences/aliases/{{ a.id }}"
                     hx-target="#pref-{{ item.id }}"
                     hx-swap="outerHTML"
                 >&times;</button>
-                {% endif %}
             </span>
             {% endfor %}
         </div>

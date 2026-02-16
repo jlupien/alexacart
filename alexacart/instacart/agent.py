@@ -66,18 +66,22 @@ _JS_EXTRACT_PRODUCT = """
         if (pm) { price = pm[0]; break; }
     }
 
-    // Stock status: only true if the main product's "Add to cart" or "Request"
-    // button exists and is enabled, or if it's already in cart ("N in cart").
-    // "Request" appears for low-stock items — treat as in-stock.
-    // Do NOT match bare "Add" — that catches suggested-product buttons at page bottom.
+    // Stock status: only count "Add to cart" / "Request" / "N in cart" buttons
+    // that are visible in the initial viewport (above the fold). This excludes
+    // buttons on suggested/similar products below the fold, which caused false
+    // positives when the main product was actually out of stock.
     var in_stock = false;
+    var viewH = window.innerHeight;
     var btns = document.querySelectorAll('button, [role="button"]');
     for (var i = 0; i < btns.length; i++) {
         var bt = (btns[i].textContent || '').trim().toLowerCase();
         if (((bt === 'add to cart' || bt === 'request') && !btns[i].disabled)
             || /\\d+\\s*in\\s*cart/i.test(bt)) {
-            in_stock = true;
-            break;
+            var rect = btns[i].getBoundingClientRect();
+            if (rect.top >= 0 && rect.top < viewH) {
+                in_stock = true;
+                break;
+            }
         }
     }
 
@@ -890,19 +894,26 @@ class InstacartAgent:
         js_check_and_click = """
             (function() {
                 var elems = document.querySelectorAll('button, [role="button"]');
+                var viewH = window.innerHeight;
 
-                // Check if already in cart
+                // Check if already in cart (viewport only)
                 for (var i = 0; i < elems.length; i++) {
                     var t = (elems[i].textContent || '').trim();
-                    if (/\\d+\\s*in\\s*cart/i.test(t)) return 'ALREADY_IN_CART';
+                    if (/\\d+\\s*in\\s*cart/i.test(t)) {
+                        var rect = elems[i].getBoundingClientRect();
+                        if (rect.top >= 0 && rect.top < viewH) return 'ALREADY_IN_CART';
+                    }
                 }
 
-                // Find and click "Add to cart" or "Request" button
+                // Find and click "Add to cart" or "Request" button (viewport only)
                 for (var i = 0; i < elems.length; i++) {
                     var t = (elems[i].textContent || '').trim().toLowerCase();
                     if ((t === 'add to cart' || t === 'add' || t === 'request') && !elems[i].disabled) {
-                        elems[i].click();
-                        return 'CLICKED';
+                        var rect = elems[i].getBoundingClientRect();
+                        if (rect.top >= 0 && rect.top < viewH) {
+                            elems[i].click();
+                            return 'CLICKED';
+                        }
                     }
                 }
 

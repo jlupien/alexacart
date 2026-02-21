@@ -72,6 +72,7 @@ class ProposalItem:
     alternatives: list[ProductOption] = field(default_factory=list)
     extra_alexa_items: list[dict] = field(default_factory=list)
     auto_committed: bool = False  # True if added to cart during search (rank 1 match)
+    _raw_alexa_item: dict = field(default_factory=dict, repr=False)  # Raw API dict for mark_complete
 
 
 @dataclass
@@ -250,9 +251,10 @@ async def _run_order(session: OrderSession):
                         alexa_list_id=primary.list_id,
                         alexa_item_version=primary.version,
                         extra_alexa_items=[
-                            {"item_id": e.item_id, "text": e.text, "list_id": e.list_id, "version": e.version}
+                            {"item_id": e.item_id, "text": e.text, "list_id": e.list_id, "version": e.version, "_raw": e._raw}
                             for e in extras
                         ],
+                        _raw_alexa_item=primary._raw,
                     )
                 )
             session.total_items = len(session.proposals)
@@ -316,6 +318,7 @@ async def _auto_checkoff_alexa(alexa_client, proposal: ProposalItem):
         text=proposal.alexa_text,
         list_id=proposal.alexa_list_id,
         version=proposal.alexa_item_version,
+        _raw=proposal._raw_alexa_item,
     )
     checked_off = await alexa_client.mark_complete(alexa_item)
     if not checked_off:
@@ -327,6 +330,7 @@ async def _auto_checkoff_alexa(alexa_client, proposal: ProposalItem):
             text=extra["text"],
             list_id=extra["list_id"],
             version=extra["version"],
+            _raw=extra.get("_raw", {}),
         )
         extra_ok = await alexa_client.mark_complete(extra_item)
         if not extra_ok:

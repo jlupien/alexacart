@@ -219,6 +219,8 @@ class AlexaClient:
                     AlexaListItem(
                         item_id=item.get("id", ""),
                         text=item.get("value", ""),
+                        list_id=item.get("listId", ""),
+                        version=item.get("version", 1),
                         completed=False,
                         _raw=item,
                     )
@@ -235,12 +237,18 @@ class AlexaClient:
             if item._raw:
                 update_data = {**item._raw, "completed": True}
             else:
+                logger.warning(
+                    "No raw Alexa item data for '%s' — using minimal payload (may fail)",
+                    item.text,
+                )
                 update_data = {
                     "id": item.item_id,
                     "value": item.text,
                     "completed": True,
                     "type": "TASK",
                 }
+
+            logger.debug("mark_complete payload keys: %s", list(update_data.keys()))
 
             resp = await self._request_with_retry(
                 "PUT",

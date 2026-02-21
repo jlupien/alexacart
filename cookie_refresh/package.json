@@ -1,9 +1,0 @@
-{
-  "name": "alexacart-cookie-refresh",
-  "version": "1.0.0",
-  "private": true,
-  "description": "Cookie refresh sidecar using alexa-cookie2",
-  "dependencies": {
-    "alexa-cookie2": "^3.0.0"
-  }
-}

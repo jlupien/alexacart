@@ -15,9 +15,6 @@ wheels/
 # Data directory (runtime)
 data/
 
-# Node modules
-cookie_refresh/node_modules/
-
 # IDE
 .idea/
 .vscode/

@@ -125,7 +125,7 @@ async def start_order(request: Request):
 
 async def _run_order(session: OrderSession):
     """Background task: check logins, fetch Alexa list, then search Instacart."""
-    from alexacart.alexa.auth import extract_cookies_via_nodriver
+    from alexacart.alexa.auth import extract_cookies_via_nodriver, refresh_cookies_via_token
     from alexacart.alexa.client import AlexaClient
     from alexacart.instacart.agent import BrowserPool
 
@@ -133,49 +133,69 @@ async def _run_order(session: OrderSession):
     session.browser_pool = pool
 
     try:
-        # Step 1: Parallel auth — Instacart via browser-use, Amazon via nodriver.
-        # nodriver is used for Amazon because browser-use/Playwright sessions get
-        # flagged by Amazon's bot detection, resulting in limited-scope tokens
-        # that can't access the Shopping List API.
+        # Step 1: Parallel auth — Instacart via browser-use, Amazon via token refresh or nodriver.
         session.status = "logging_in"
         session.status_detail = "Checking logins..."
 
         on_status = lambda msg: setattr(session, "status_detail", msg)
 
-        instacart_result, amazon_result = await asyncio.gather(
-            pool.start_with_auth(on_status=on_status),
-            extract_cookies_via_nodriver(on_status=on_status),
-            return_exceptions=True,
-        )
+        # Try fast token refresh first (no browser needed, ~1s)
+        token_cookie_data = await refresh_cookies_via_token()
 
-        # Process Instacart result
-        if isinstance(instacart_result, Exception):
-            logger.error("Instacart auth failed: %s", instacart_result, exc_info=True)
-            session.error = f"Instacart login failed: {instacart_result}"
-            session.status = "error"
-            return
-        if not instacart_result:
-            session.error = "Timed out waiting for Instacart login. Please try again."
-            session.status = "error"
-            return
+        if token_cookie_data:
+            # Token refresh succeeded — only need Instacart auth
+            logger.info("Amazon cookies refreshed via token, skipping nodriver")
+            on_status("Amazon cookies refreshed via token")
+            instacart_result = await pool.start_with_auth(on_status=on_status)
 
-        # Process Amazon/nodriver result
-        if isinstance(amazon_result, Exception):
-            logger.error("nodriver cookie extraction failed: %s", amazon_result, exc_info=True)
-            session.error = f"Amazon authentication failed: {amazon_result}"
-            session.status = "error"
-            return
-        cookie_data = amazon_result
-        if not cookie_data or not cookie_data.get("cookies"):
-            session.error = "Could not extract Amazon cookies. Please try again."
-            session.status = "error"
-            return
+            if isinstance(instacart_result, Exception):
+                logger.error("Instacart auth failed: %s", instacart_result, exc_info=True)
+                session.error = f"Instacart login failed: {instacart_result}"
+                session.status = "error"
+                return
+            if not instacart_result:
+                session.error = "Timed out waiting for Instacart login. Please try again."
+                session.status = "error"
+                return
+
+            cookie_data = token_cookie_data
+        else:
+            # No refresh token or token expired — fall back to full nodriver OAuth flow
+            logger.info("Token refresh unavailable, using nodriver for Amazon auth")
+            instacart_result, amazon_result = await asyncio.gather(
+                pool.start_with_auth(on_status=on_status),
+                extract_cookies_via_nodriver(on_status=on_status),
+                return_exceptions=True,
+            )
+
+            # Process Instacart result
+            if isinstance(instacart_result, Exception):
+                logger.error("Instacart auth failed: %s", instacart_result, exc_info=True)
+                session.error = f"Instacart login failed: {instacart_result}"
+                session.status = "error"
+                return
+            if not instacart_result:
+                session.error = "Timed out waiting for Instacart login. Please try again."
+                session.status = "error"
+                return
+
+            # Process Amazon/nodriver result
+            if isinstance(amazon_result, Exception):
+                logger.error("nodriver cookie extraction failed: %s", amazon_result, exc_info=True)
+                session.error = f"Amazon authentication failed: {amazon_result}"
+                session.status = "error"
+                return
+            cookie_data = amazon_result
+            if not cookie_data or not cookie_data.get("cookies"):
+                session.error = "Could not extract Amazon cookies. Please try again."
+                session.status = "error"
+                return
 
         # Step 2: Fetch Alexa shopping list using nodriver cookies
         # AlexaClient stays open through search phase for auto-commit check-offs
         session.status_detail = "Fetching your Alexa shopping list..."
         alexa_client = AlexaClient(
-            cookie_refresh_fn=lambda: extract_cookies_via_nodriver(),
+            cookie_refresh_fn=lambda: refresh_cookies_via_token(),
             interactive_cookie_refresh_fn=lambda: extract_cookies_via_nodriver(
                 on_status=on_status,
                 force_relogin=True,
@@ -865,7 +885,7 @@ async def _commit_single_item(
 
 async def _run_commit(session: OrderSession):
     """Background task: add items to Instacart cart and check off Alexa list — in parallel."""
-    from alexacart.alexa.auth import extract_cookies_via_nodriver
+    from alexacart.alexa.auth import extract_cookies_via_nodriver, refresh_cookies_via_token
     from alexacart.alexa.client import AlexaClient
     from alexacart.instacart.agent import BrowserPool
 
@@ -878,7 +898,7 @@ async def _run_commit(session: OrderSession):
         await pool.start_with_auth()
 
     alexa_client = AlexaClient(
-        cookie_refresh_fn=lambda: extract_cookies_via_nodriver(),
+        cookie_refresh_fn=lambda: refresh_cookies_via_token(),
         interactive_cookie_refresh_fn=lambda: extract_cookies_via_nodriver(
             force_relogin=True,
         ),

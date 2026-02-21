@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from alexacart.alexa.auth import ensure_valid_cookies, get_cookie_header, save_cookies, try_refresh_via_sidecar
+from alexacart.alexa.auth import ensure_valid_cookies, get_cookie_header, refresh_cookies_via_token, save_cookies
 from alexacart.config import settings
 
 logger = logging.getLogger(__name__)
@@ -129,8 +129,16 @@ class AlexaClient:
                 logger.info("Got 401, attempting cookie refresh...")
                 refreshed = None
 
-                # Try browser-based refresh first (if available)
-                if self._cookie_refresh_fn:
+                # 1. Try token refresh first (pure HTTP, fast, no browser)
+                try:
+                    refreshed = await refresh_cookies_via_token()
+                    if refreshed:
+                        logger.info("Cookies refreshed via token exchange")
+                except Exception as e:
+                    logger.warning("Token cookie refresh failed: %s", e)
+
+                # 2. Try browser-based refresh (nodriver re-extraction)
+                if not refreshed and self._cookie_refresh_fn:
                     try:
                         refreshed = await self._cookie_refresh_fn()
                         if refreshed:
@@ -139,14 +147,10 @@ class AlexaClient:
                     except Exception as e:
                         logger.warning("Browser cookie refresh failed: %s", e)
 
-                # Fall back to Node.js sidecar
-                if not refreshed:
-                    refreshed = await asyncio.to_thread(try_refresh_via_sidecar)
-
                 if refreshed:
                     resp = await self._update_cookies_and_retry(refreshed, method, url, **kwargs)
 
-                    # If still 401, try interactive re-login as last resort
+                    # 3. If still 401, try interactive re-login as last resort
                     if resp.status_code == 401 and self._interactive_cookie_refresh_fn:
                         logger.info("Automatic refresh failed (still 401), trying interactive re-login...")
                         try:

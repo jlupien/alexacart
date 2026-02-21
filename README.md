@@ -103,7 +103,7 @@ alexacart/
 │   ├── db.py                 # SQLAlchemy setup
 │   ├── models.py             # ORM models
 │   ├── alexa/                # Amazon/Alexa integration
-│   │   ├── auth.py           # Cookie management (nodriver extraction)
+│   │   ├── auth.py           # Cookie management (OAuth device registration + nodriver)
 │   │   └── client.py         # Alexa list API client
 │   ├── instacart/
 │   │   └── agent.py          # browser-use agent

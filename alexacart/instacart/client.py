@@ -176,8 +176,7 @@ class InstacartClient:
         unfetched_ids: list[str] = []
 
         for placement in placements:
-            items = placement.get("items") or []
-            item_ids = placement.get("itemIds") or []
+            items, item_ids = self._extract_placement_items(placement)
 
             for item in items:
                 pr = self._parse_item(item)
@@ -306,6 +305,28 @@ class InstacartClient:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_placement_items(placement: dict) -> tuple[list[dict], list[str]]:
+        """Extract items and itemIds from a search placement.
+
+        Items can be nested at multiple levels:
+        - placement.content.items / placement.content.itemIds (product grids)
+        - placement.content.placement.items / ...itemIds (ad placements)
+        """
+        content = placement.get("content") or {}
+
+        # Check content directly (regular product placements)
+        items = content.get("items") or []
+        item_ids = content.get("itemIds") or []
+
+        # Check nested content.placement (ad/promoted placements)
+        if not items and not item_ids:
+            nested = content.get("placement") or {}
+            items = nested.get("items") or []
+            item_ids = nested.get("itemIds") or []
+
+        return items, item_ids
 
     async def _discover_cart_id(self):
         try:

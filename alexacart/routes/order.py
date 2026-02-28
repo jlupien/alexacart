@@ -51,6 +51,7 @@ class ProductOption:
     image_url: str | None = None
     in_stock: bool = True
     item_id: str | None = None
+    size: str | None = None
 
 
 @dataclass
@@ -68,6 +69,7 @@ class ProposalItem:
     price: str | None = None
     image_url: str | None = None
     item_id: str | None = None  # Instacart item ID (e.g. "items_7395-24123650")
+    size: str | None = None
     status: str = "Pending"  # Matched, Substituted, New item, Error
     status_class: str = "new"  # matched, substituted, new, error
     in_stock: bool = True
@@ -278,6 +280,7 @@ async def _apply_search_results(
         proposal.price = best.price
         proposal.image_url = best.image_url
         proposal.item_id = best.item_id
+        proposal.size = best.size
         proposal.status = status
         proposal.status_class = status_class
         proposal.in_stock = best.in_stock
@@ -290,6 +293,7 @@ async def _apply_search_results(
                 image_url=r.image_url,
                 in_stock=r.in_stock,
                 item_id=r.item_id,
+                size=r.size,
             )
             for r in results
         ]
@@ -361,6 +365,7 @@ async def _search_single_item(
                     proposal.price = result.price
                     proposal.image_url = result.image_url or pref.image_url
                     proposal.item_id = result.item_id
+                    proposal.size = result.size or pref.size
                     proposal.in_stock = True
                     found = True
 
@@ -400,6 +405,7 @@ async def _search_single_item(
                                 product_url=proposal.product_url,
                                 brand=proposal.brand,
                                 image_url=proposal.image_url,
+                                size=proposal.size,
                                 was_corrected=False,
                             )
 
@@ -617,6 +623,7 @@ async def search_products(request: Request, q: str = Query(...), index: int = Qu
                 "price": r.price,
                 "image_url": r.image_url,
                 "item_id": r.item_id,
+                "size": r.size,
             }
             for r in results
         ]
@@ -665,7 +672,7 @@ async def fetch_product_url(
                 f'selectProduct({index}, {json.dumps(result.product_name)}, '
                 f'{json.dumps(result.price or "")}, {json.dumps(result.image_url or "")}, '
                 f'{json.dumps(url)}, {json.dumps(result.brand or "")}, '
-                f'{json.dumps(result.item_id or "")})'
+                f'{json.dumps(result.item_id or "")}, {json.dumps(result.size or "")})'
                 f'</script>'
             )
         return HTMLResponse(
@@ -814,6 +821,7 @@ async def _commit_single_item(
 
         if added:
             image_url = data.get("image_url") or (proposal.image_url if proposal else None)
+            size = data.get("size") or (proposal.size if proposal else None)
             _learn_from_result(
                 db,
                 alexa_text=alexa_text,
@@ -822,6 +830,7 @@ async def _commit_single_item(
                 product_url=product_url or None,
                 brand=data.get("brand"),
                 image_url=image_url,
+                size=size or None,
                 was_corrected=was_corrected,
             )
 
@@ -1059,20 +1068,21 @@ def _learn_from_result(
     brand: str | None,
     image_url: str | None,
     was_corrected: bool,
+    size: str | None = None,
 ):
     """Learn from the user's choices to improve future proposals."""
     if grocery_item_id:
         # Known item
         if was_corrected:
             # User changed the proposal — make their choice the top preference
-            make_product_top_choice(db, grocery_item_id, final_product, product_url=product_url, brand=brand, image_url=image_url)
+            make_product_top_choice(db, grocery_item_id, final_product, product_url=product_url, brand=brand, image_url=image_url, size=size)
         else:
             # User accepted — ensure product is in preferences (dedup by URL then name)
-            add_preferred_product(db, grocery_item_id, final_product, product_url=product_url, brand=brand, image_url=image_url)
+            add_preferred_product(db, grocery_item_id, final_product, product_url=product_url, brand=brand, image_url=image_url, size=size)
     else:
         # Unknown item — create new grocery item + alias + preferred product
         item = create_grocery_item(db, alexa_text)
-        add_preferred_product(db, item.id, final_product, product_url=product_url, brand=brand, image_url=image_url, rank=1)
+        add_preferred_product(db, item.id, final_product, product_url=product_url, brand=brand, image_url=image_url, rank=1, size=size)
 
 
 @router.delete("/history/{session_id}")

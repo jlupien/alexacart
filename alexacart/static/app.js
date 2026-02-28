@@ -1,4 +1,4 @@
-function selectProduct(index, productName, price, imageUrl, productUrl, brand, itemId) {
+function selectProduct(index, productName, price, imageUrl, productUrl, brand, itemId, size) {
     var row = document.getElementById('row-' + index);
     if (!row) return;
 
@@ -8,11 +8,13 @@ function selectProduct(index, productName, price, imageUrl, productUrl, brand, i
     var imgInput = row.querySelector('.hidden-image-url');
     var brandInput = row.querySelector('.hidden-brand');
     var itemIdInput = row.querySelector('.hidden-item-id');
+    var sizeInput = row.querySelector('.hidden-size');
     if (nameInput) nameInput.value = productName;
     if (urlInput) urlInput.value = productUrl || '';
     if (imgInput) imgInput.value = imageUrl || '';
     if (brandInput) brandInput.value = brand || '';
     if (itemIdInput) itemIdInput.value = itemId || '';
+    if (sizeInput) sizeInput.value = size || '';
 
     // Unmark skip if it was set
     var skipInput = row.querySelector('.hidden-skip');
@@ -57,6 +59,7 @@ function selectProduct(index, productName, price, imageUrl, productUrl, brand, i
     radio.setAttribute('data-image-url', imageUrl || '');
     radio.setAttribute('data-brand', brand || '');
     radio.setAttribute('data-item-id', itemId || '');
+    radio.setAttribute('data-size', size || '');
     radio.onchange = function() { selectAlternative(index, this); };
     label.appendChild(radio);
 
@@ -84,6 +87,12 @@ function selectProduct(index, productName, price, imageUrl, productUrl, brand, i
         priceSpan.className = 'price';
         priceSpan.textContent = price;
         details.appendChild(priceSpan);
+    }
+    if (size) {
+        var sizeSpan = document.createElement('span');
+        sizeSpan.className = 'size';
+        sizeSpan.textContent = size;
+        details.appendChild(sizeSpan);
     }
     if (productUrl) {
         var link = document.createElement('a');
@@ -115,13 +124,14 @@ function selectAlternative(index, radio) {
     var urlInput = row.querySelector('.hidden-product-url');
     var imgInput = row.querySelector('.hidden-image-url');
     var brandInput = row.querySelector('.hidden-brand');
-
     var itemIdInput = row.querySelector('.hidden-item-id');
+    var sizeInput = row.querySelector('.hidden-size');
     if (nameInput) nameInput.value = radio.dataset.productName || '';
     if (urlInput) urlInput.value = radio.dataset.productUrl || '';
     if (imgInput) imgInput.value = radio.dataset.imageUrl || '';
     if (brandInput) brandInput.value = radio.dataset.brand || '';
     if (itemIdInput) itemIdInput.value = radio.dataset.itemId || '';
+    if (sizeInput) sizeInput.value = radio.dataset.size || '';
 
     // Unmark skip
     var skipInput = row.querySelector('.hidden-skip');

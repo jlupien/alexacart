@@ -152,6 +152,7 @@ async def add_product_from_url(
             product_url=result.product_url or url,
             brand=result.brand,
             image_url=result.image_url,
+            size=result.size,
         )
         db.commit()
         item = db.get(GroceryItem, item_id)

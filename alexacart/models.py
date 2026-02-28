@@ -46,6 +46,7 @@ class PreferredProduct(Base):
     product_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     brand: Mapped[str | None] = mapped_column(String, nullable=True)
     image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    size: Mapped[str | None] = mapped_column(String, nullable=True)
     last_seen_in_stock: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     grocery_item: Mapped["GroceryItem"] = relationship(back_populates="preferred_products")

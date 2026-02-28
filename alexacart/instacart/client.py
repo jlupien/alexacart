@@ -308,23 +308,22 @@ class InstacartClient:
 
     @staticmethod
     def _extract_placement_items(placement: dict) -> tuple[list[dict], list[str]]:
-        """Extract items and itemIds from a search placement.
+        """Extract items and itemIds from a search placement, skipping ads.
 
-        Items can be nested at multiple levels:
-        - placement.content.items / placement.content.itemIds (product grids)
-        - placement.content.placement.items / ...itemIds (ad placements)
+        Items are nested at: placement.content.items / placement.content.itemIds.
+        Ad/sponsored placements (content.__typename starting with "Ads") are
+        skipped entirely so organic results come first.
         """
         content = placement.get("content") or {}
 
-        # Check content directly (regular product placements)
+        # Skip ad/sponsored placements
+        content_type = content.get("__typename") or ""
+        if content_type.startswith("Ads"):
+            return [], []
+
+        # Regular product placements
         items = content.get("items") or []
         item_ids = content.get("itemIds") or []
-
-        # Check nested content.placement (ad/promoted placements)
-        if not items and not item_ids:
-            nested = content.get("placement") or {}
-            items = nested.get("items") or []
-            item_ids = nested.get("itemIds") or []
 
         return items, item_ids
 

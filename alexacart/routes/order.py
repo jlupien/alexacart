@@ -50,6 +50,7 @@ class ProductOption:
     price: str | None = None
     image_url: str | None = None
     in_stock: bool = True
+    item_id: str | None = None
 
 
 @dataclass
@@ -66,6 +67,7 @@ class ProposalItem:
     brand: str | None = None
     price: str | None = None
     image_url: str | None = None
+    item_id: str | None = None  # Instacart item ID (e.g. "items_7395-24123650")
     status: str = "Pending"  # Matched, Substituted, New item, Error
     status_class: str = "new"  # matched, substituted, new, error
     in_stock: bool = True
@@ -88,8 +90,8 @@ class OrderSession:
     commit_queue: asyncio.Queue | None = None
     commit_items_data: dict = field(default_factory=dict)
     active_commits: set = field(default_factory=set)
-    # Persistent browser pool (shared between search and commit)
-    browser_pool: object | None = None
+    # Instacart API client (shared between search and commit)
+    instacart_client: object | None = None
     # Detailed status text shown during logging_in phase
     status_detail: str = ""
     auto_committed_count: int = 0
@@ -128,59 +130,42 @@ async def _run_order(session: OrderSession):
     """Background task: check logins, fetch Alexa list, then search Instacart."""
     from alexacart.alexa.auth import extract_cookies_via_nodriver, refresh_cookies_via_token
     from alexacart.alexa.client import AlexaClient
-    from alexacart.instacart.agent import BrowserPool
-
-    pool = BrowserPool(settings.search_concurrency)
-    session.browser_pool = pool
+    from alexacart.instacart.auth import ensure_valid_session, extract_session_via_nodriver
+    from alexacart.instacart.client import InstacartClient
 
     try:
-        # Step 1: Parallel auth — Instacart via browser-use, Amazon via token refresh or nodriver.
+        # Step 1: Parallel auth — Instacart via cached cookies, Amazon via token refresh or nodriver.
         session.status = "logging_in"
         session.status_detail = "Checking logins..."
 
         on_status = lambda msg: setattr(session, "status_detail", msg)
 
-        # Try fast token refresh first (no browser needed, ~1s)
+        # Try fast token refresh first for Amazon (no browser needed, ~1s)
         token_cookie_data = await refresh_cookies_via_token()
 
         if token_cookie_data:
-            # Token refresh succeeded — only need Instacart auth
             logger.info("Amazon cookies refreshed via token, skipping nodriver")
             on_status("Amazon cookies refreshed via token")
-            instacart_result = await pool.start_with_auth(on_status=on_status)
-
-            if isinstance(instacart_result, Exception):
-                logger.error("Instacart auth failed: %s", instacart_result, exc_info=True)
-                session.error = f"Instacart login failed: {instacart_result}"
-                session.status = "error"
-                return
-            if not instacart_result:
-                session.error = "Timed out waiting for Instacart login. Please try again."
-                session.status = "error"
-                return
-
+            # Get Instacart session (cached or via nodriver)
+            instacart_data = await ensure_valid_session()
             cookie_data = token_cookie_data
         else:
-            # No refresh token or token expired — fall back to full nodriver OAuth flow
+            # No refresh token or token expired — run both auths
             logger.info("Token refresh unavailable, using nodriver for Amazon auth")
+            on_status("Authenticating...")
             instacart_result, amazon_result = await asyncio.gather(
-                pool.start_with_auth(on_status=on_status),
+                ensure_valid_session(),
                 extract_cookies_via_nodriver(on_status=on_status),
                 return_exceptions=True,
             )
 
-            # Process Instacart result
             if isinstance(instacart_result, Exception):
                 logger.error("Instacart auth failed: %s", instacart_result, exc_info=True)
                 session.error = f"Instacart login failed: {instacart_result}"
                 session.status = "error"
                 return
-            if not instacart_result:
-                session.error = "Timed out waiting for Instacart login. Please try again."
-                session.status = "error"
-                return
+            instacart_data = instacart_result
 
-            # Process Amazon/nodriver result
             if isinstance(amazon_result, Exception):
                 logger.error("nodriver cookie extraction failed: %s", amazon_result, exc_info=True)
                 session.error = f"Amazon authentication failed: {amazon_result}"
@@ -192,8 +177,15 @@ async def _run_order(session: OrderSession):
                 session.status = "error"
                 return
 
-        # Step 2: Fetch Alexa shopping list using nodriver cookies
-        # AlexaClient stays open through search phase for auto-commit check-offs
+        # Create Instacart client
+        client = InstacartClient(instacart_data)
+        session.instacart_client = client
+        try:
+            await client.init_session()
+        except Exception as e:
+            logger.warning("Instacart session init warning: %s", e)
+
+        # Step 2: Fetch Alexa shopping list
         session.status_detail = "Fetching your Alexa shopping list..."
         alexa_client = AlexaClient(
             cookie_refresh_fn=lambda: refresh_cookies_via_token(),
@@ -259,8 +251,8 @@ async def _run_order(session: OrderSession):
                 )
             session.total_items = len(session.proposals)
 
-            # Step 4: Search Instacart for each item (pool is already running)
-            await _search_items(session, pool, alexa_client)
+            # Step 4: Search Instacart for each item
+            await _search_items(session, client, alexa_client)
         finally:
             await alexa_client.close()
 
@@ -268,16 +260,16 @@ async def _run_order(session: OrderSession):
         logger.exception("Order flow failed")
         session.error = str(e)
         session.status = "error"
-        # Close pool on error (commit won't happen)
-        await pool.close()
-        session.browser_pool = None
+        if session.instacart_client:
+            await session.instacart_client.close()
+            session.instacart_client = None
 
 
 async def _apply_search_results(
-    proposal: ProposalItem, agent, query: str, status: str, status_class: str
+    proposal: ProposalItem, client, query: str, status: str, status_class: str
 ):
     """Search Instacart and apply the best result to a proposal."""
-    results = await agent.search_product(query)
+    results = await client.search_products(query)
     if results:
         best = results[0]
         proposal.product_name = best.product_name
@@ -285,6 +277,7 @@ async def _apply_search_results(
         proposal.brand = best.brand
         proposal.price = best.price
         proposal.image_url = best.image_url
+        proposal.item_id = best.item_id
         proposal.status = status
         proposal.status_class = status_class
         proposal.in_stock = best.in_stock
@@ -296,6 +289,7 @@ async def _apply_search_results(
                 price=r.price,
                 image_url=r.image_url,
                 in_stock=r.in_stock,
+                item_id=r.item_id,
             )
             for r in results
         ]
@@ -340,10 +334,9 @@ async def _auto_checkoff_alexa(alexa_client, proposal: ProposalItem):
 
 
 async def _search_single_item(
-    session: OrderSession, proposal: ProposalItem, pool, alexa_client,
+    session: OrderSession, proposal: ProposalItem, client, alexa_client,
 ):
-    """Search Instacart for a single item using a worker from the pool."""
-    worker = await pool.acquire()
+    """Search Instacart for a single item using the API client."""
     db = SessionLocal()
 
     session.active_searches.add(proposal.alexa_text)
@@ -357,11 +350,9 @@ async def _search_single_item(
             found = False
             for pref in match.preferred_products:
                 if pref.product_url:
-                    result = await worker.check_product_by_url_fast(pref.product_url)
-                    if result is None:
-                        result = await worker.check_product_by_url(pref.product_url)
+                    result = await client.get_product_details(pref.product_url)
                 else:
-                    results = await worker.search_product(pref.product_name)
+                    results = await client.search_products(pref.product_name, limit=1)
                     result = results[0] if results else None
                 if result and result.in_stock:
                     proposal.product_name = result.product_name
@@ -369,6 +360,7 @@ async def _search_single_item(
                     proposal.brand = result.brand or pref.brand
                     proposal.price = result.price
                     proposal.image_url = result.image_url or pref.image_url
+                    proposal.item_id = result.item_id
                     proposal.in_stock = True
                     found = True
 
@@ -376,22 +368,9 @@ async def _search_single_item(
                     db.commit()
 
                     # Auto-commit rank-1 matches immediately
-                    if pref.rank == 1:
+                    if pref.rank == 1 and result.item_id:
                         try:
-                            # Fast-path: click "Add to cart" on the already-loaded
-                            # product page via JS (no navigation or LLM call)
-                            added = await worker.click_add_to_cart_on_current_page()
-                            if not added and proposal.product_url:
-                                logger.warning(
-                                    "JS fast-path add-to-cart failed for '%s', retrying by URL only",
-                                    proposal.alexa_text,
-                                )
-                                # Use add_to_cart_by_url (NOT add_to_cart) to avoid
-                                # the search-by-name fallback that lets the LLM pick
-                                # a substitute product without user approval.
-                                added = await worker.add_to_cart_by_url(
-                                    proposal.product_url,
-                                )
+                            added = await client.add_to_cart(result.item_id)
                         except Exception as add_err:
                             logger.warning(
                                 "Auto-commit add_to_cart failed for '%s': %s",
@@ -436,7 +415,6 @@ async def _search_single_item(
                             db.add(log_entry)
                             db.commit()
                         else:
-                            # Fallback: show normally on review page
                             proposal.status = f"Matched (choice #{pref.rank})"
                             proposal.status_class = "matched"
                     else:
@@ -447,12 +425,12 @@ async def _search_single_item(
 
             if not found:
                 await _apply_search_results(
-                    proposal, worker, proposal.alexa_text,
+                    proposal, client, proposal.alexa_text,
                     "Substituted (usual out of stock)", "substituted",
                 )
         else:
             await _apply_search_results(
-                proposal, worker, proposal.alexa_text, "New item", "new",
+                proposal, client, proposal.alexa_text, "New item", "new",
             )
 
     except Exception as e:
@@ -463,23 +441,19 @@ async def _search_single_item(
         session.active_searches.discard(proposal.alexa_text)
         session.searched_count += 1
         db.close()
-        pool.release(worker)
 
 
-async def _search_items(session: OrderSession, pool, alexa_client):
-    """Search Instacart for each item in the session — in parallel via BrowserPool."""
+async def _search_items(session: OrderSession, client, alexa_client):
+    """Search Instacart for each item in the session — in parallel via API."""
     session.status = "searching"
 
     try:
-        logger.info(
-            "Searching %d items with BrowserPool (%d agents)",
-            len(session.proposals), pool._size,
-        )
+        logger.info("Searching %d items via Instacart API", len(session.proposals))
 
-        # Launch all searches concurrently — pool limits actual parallelism
+        # Launch all searches concurrently — API handles parallelism
         results = await asyncio.gather(
             *[
-                _search_single_item(session, proposal, pool, alexa_client)
+                _search_single_item(session, proposal, client, alexa_client)
                 for proposal in session.proposals
             ],
             return_exceptions=True,
@@ -628,11 +602,13 @@ async def review_page(request: Request, session_id: str):
 @router.get("/search")
 async def search_products(request: Request, q: str = Query(...), index: int = Query(0)):
     """Search Instacart for a product (used by the product picker)."""
-    from alexacart.instacart.agent import InstacartAgent
+    from alexacart.instacart.auth import ensure_valid_session
+    from alexacart.instacart.client import InstacartClient
 
-    agent = InstacartAgent(headless=True)
+    client = InstacartClient(await ensure_valid_session())
     try:
-        results = await agent.search_product(q)
+        await client.init_session()
+        results = await client.search_products(q)
         product_dicts = [
             {
                 "product_name": r.product_name,
@@ -640,6 +616,7 @@ async def search_products(request: Request, q: str = Query(...), index: int = Qu
                 "brand": r.brand,
                 "price": r.price,
                 "image_url": r.image_url,
+                "item_id": r.item_id,
             }
             for r in results
         ]
@@ -654,7 +631,7 @@ async def search_products(request: Request, q: str = Query(...), index: int = Qu
             f'<div class="status-message status-error">Search failed: {html_escape(str(e))}</div>'
         )
     finally:
-        await agent.close()
+        await client.close()
 
 
 @router.post("/fetch-url")
@@ -665,36 +642,30 @@ async def fetch_product_url(
     session_id: str = Form(""),
 ):
     """Fetch product details from a custom Instacart URL."""
-    from alexacart.instacart.agent import InstacartAgent
+    from alexacart.instacart.auth import ensure_valid_session
+    from alexacart.instacart.client import InstacartClient
 
-    # Reuse an agent from the active order's BrowserPool when available,
-    # instead of launching a brand-new browser (which can timeout).
-    pool = None
-    agent = None
-    borrowed = False
-
+    # Reuse the session's client if available, otherwise create a temporary one
     session = _sessions.get(session_id) if session_id else None
-    if session and session.browser_pool and not session.browser_pool._closed:
-        pool = session.browser_pool
-        try:
-            agent = await asyncio.wait_for(pool.acquire(), timeout=5)
-            borrowed = True
-        except (asyncio.TimeoutError, Exception):
-            agent = None
+    client = None
+    owned = False
 
-    if agent is None:
-        agent = InstacartAgent(headless=True)
+    if session and session.instacart_client:
+        client = session.instacart_client
+    else:
+        client = InstacartClient(await ensure_valid_session())
+        await client.init_session()
+        owned = True
 
     try:
-        result = await agent.check_product_by_url_fast(url)
-        if result is None:
-            result = await agent.check_product_by_url(url)
+        result = await client.get_product_details(url)
         if result:
             return HTMLResponse(
                 f'<script>'
                 f'selectProduct({index}, {json.dumps(result.product_name)}, '
                 f'{json.dumps(result.price or "")}, {json.dumps(result.image_url or "")}, '
-                f'{json.dumps(url)}, {json.dumps(result.brand or "")})'
+                f'{json.dumps(url)}, {json.dumps(result.brand or "")}, '
+                f'{json.dumps(result.item_id or "")})'
                 f'</script>'
             )
         return HTMLResponse(
@@ -708,10 +679,8 @@ async def fetch_product_url(
             f'Error: {html_escape(str(e))}</div>'
         )
     finally:
-        if borrowed and pool:
-            pool.release(agent)
-        elif not borrowed:
-            await agent.close()
+        if owned and client:
+            await client.close()
 
 
 @router.post("/commit")
@@ -768,7 +737,7 @@ async def _commit_single_item(
     session: OrderSession,
     idx: int,
     data: dict,
-    pool,
+    client,
     alexa_client,
     q: asyncio.Queue,
     total: int,
@@ -778,7 +747,7 @@ async def _commit_single_item(
     product_name = data.get("product_name", "")
     alexa_text = data.get("alexa_text", "")
     grocery_item_id = data.get("grocery_item_id", "")
-    alexa_item_id = data.get("alexa_item_id", "")
+    item_id = data.get("item_id", "")
 
     if data.get("skip") == "1":
         db = SessionLocal()
@@ -802,12 +771,12 @@ async def _commit_single_item(
         await q.put(("skip", idx, alexa_text, commit_counter[0], total))
         return {"text": alexa_text, "success": True, "reason": "Skipped", "skipped": True}
 
-    if not product_name:
+    if not product_name or not item_id:
         commit_counter[0] += 1
-        await q.put(("done", idx, alexa_text, False, "No product selected", commit_counter[0], total))
-        return {"text": alexa_text, "success": False, "reason": "No product selected"}
+        reason = "No product selected" if not product_name else "No item ID"
+        await q.put(("done", idx, alexa_text, False, reason, commit_counter[0], total))
+        return {"text": alexa_text, "success": False, "reason": reason}
 
-    worker = await pool.acquire()
     db = SessionLocal()
 
     session.active_commits.add(alexa_text)
@@ -822,7 +791,7 @@ async def _commit_single_item(
                 break
 
         product_url = data.get("product_url", "")
-        added = await worker.add_to_cart(product_name, product_url=product_url or None)
+        added = await client.add_to_cart(item_id)
         checked_off = True
 
         if added and proposal:
@@ -884,22 +853,21 @@ async def _commit_single_item(
     finally:
         session.active_commits.discard(alexa_text)
         db.close()
-        pool.release(worker)
 
 
 async def _run_commit(session: OrderSession):
     """Background task: add items to Instacart cart and check off Alexa list — in parallel."""
     from alexacart.alexa.auth import extract_cookies_via_nodriver, refresh_cookies_via_token
     from alexacart.alexa.client import AlexaClient
-    from alexacart.instacart.agent import BrowserPool
+    from alexacart.instacart.auth import ensure_valid_session
+    from alexacart.instacart.client import InstacartClient
 
-    pool = session.browser_pool
-    if pool is None:
-        # Edge case: pool lost — create a fresh one (no auth, just headless workers)
-        logger.warning("Browser pool not found on session — creating fresh pool")
-        pool = BrowserPool(settings.search_concurrency)
-        session.browser_pool = pool
-        await pool.start_with_auth()
+    client = session.instacart_client
+    if client is None:
+        logger.warning("Instacart client not found on session — creating fresh client")
+        client = InstacartClient(await ensure_valid_session())
+        session.instacart_client = client
+        await client.init_session()
 
     alexa_client = AlexaClient(
         cookie_refresh_fn=lambda: refresh_cookies_via_token(),
@@ -912,16 +880,13 @@ async def _run_commit(session: OrderSession):
     commit_counter = [0]  # mutable counter shared across parallel tasks
 
     try:
-        logger.info(
-            "Committing %d items with BrowserPool (%d agents)",
-            len(session.commit_items_data), pool._size,
-        )
+        logger.info("Committing %d items via Instacart API", len(session.commit_items_data))
 
-        # Launch all commits concurrently — pool limits actual parallelism
+        # Launch all commits concurrently
         results = await asyncio.gather(
             *[
                 _commit_single_item(
-                    session, idx, data, pool, alexa_client, q, total, commit_counter,
+                    session, idx, data, client, alexa_client, q, total, commit_counter,
                 )
                 for idx, data in sorted(session.commit_items_data.items())
             ],
@@ -949,9 +914,10 @@ async def _run_commit(session: OrderSession):
         await q.put(("error", str(e)))
     finally:
         await alexa_client.close()
-        # Close the pool — commit is the final phase
-        await pool.close()
-        session.browser_pool = None
+        # Close the client — commit is the final phase
+        if session.instacart_client:
+            await session.instacart_client.close()
+            session.instacart_client = None
 
 
 @router.get("/commit-progress/{session_id}")

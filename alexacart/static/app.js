@@ -1,4 +1,4 @@
-function selectProduct(index, productName, price, imageUrl, productUrl, brand) {
+function selectProduct(index, productName, price, imageUrl, productUrl, brand, itemId) {
     var row = document.getElementById('row-' + index);
     if (!row) return;
 
@@ -7,10 +7,12 @@ function selectProduct(index, productName, price, imageUrl, productUrl, brand) {
     var urlInput = row.querySelector('.hidden-product-url');
     var imgInput = row.querySelector('.hidden-image-url');
     var brandInput = row.querySelector('.hidden-brand');
+    var itemIdInput = row.querySelector('.hidden-item-id');
     if (nameInput) nameInput.value = productName;
     if (urlInput) urlInput.value = productUrl || '';
     if (imgInput) imgInput.value = imageUrl || '';
     if (brandInput) brandInput.value = brand || '';
+    if (itemIdInput) itemIdInput.value = itemId || '';
 
     // Unmark skip if it was set
     var skipInput = row.querySelector('.hidden-skip');
@@ -54,6 +56,7 @@ function selectProduct(index, productName, price, imageUrl, productUrl, brand) {
     radio.setAttribute('data-product-url', productUrl || '');
     radio.setAttribute('data-image-url', imageUrl || '');
     radio.setAttribute('data-brand', brand || '');
+    radio.setAttribute('data-item-id', itemId || '');
     radio.onchange = function() { selectAlternative(index, this); };
     label.appendChild(radio);
 
@@ -113,10 +116,12 @@ function selectAlternative(index, radio) {
     var imgInput = row.querySelector('.hidden-image-url');
     var brandInput = row.querySelector('.hidden-brand');
 
+    var itemIdInput = row.querySelector('.hidden-item-id');
     if (nameInput) nameInput.value = radio.dataset.productName || '';
     if (urlInput) urlInput.value = radio.dataset.productUrl || '';
     if (imgInput) imgInput.value = radio.dataset.imageUrl || '';
     if (brandInput) brandInput.value = radio.dataset.brand || '';
+    if (itemIdInput) itemIdInput.value = radio.dataset.itemId || '';
 
     // Unmark skip
     var skipInput = row.querySelector('.hidden-skip');

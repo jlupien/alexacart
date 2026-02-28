@@ -28,6 +28,7 @@
         <input type="hidden" name="items[{{ item.index }}][product_url]" value="{{ item.product_url or '' }}" class="hidden-product-url">
         <input type="hidden" name="items[{{ item.index }}][image_url]" value="{{ item.image_url or '' }}" class="hidden-image-url">
         <input type="hidden" name="items[{{ item.index }}][brand]" value="{{ item.brand or '' }}" class="hidden-brand">
+        <input type="hidden" name="items[{{ item.index }}][item_id]" value="{{ item.item_id or '' }}" class="hidden-item-id">
         <input type="hidden" name="items[{{ item.index }}][grocery_item_id]" value="{{ item.grocery_item_id or '' }}">
         <input type="hidden" name="items[{{ item.index }}][alexa_item_id]" value="{{ item.alexa_item_id or '' }}">
         <input type="hidden" name="items[{{ item.index }}][skip]" value="" class="hidden-skip">
@@ -50,6 +51,7 @@
                     data-brand="{{ alt.brand or '' }}"
                     data-price="{{ alt.price or '' }}"
                     data-image-url="{{ alt.image_url or '' }}"
+                    data-item-id="{{ alt.item_id or '' }}"
                 >
                 {% if alt.image_url %}<img src="{{ alt.image_url }}" alt="" class="option-thumb">{% endif %}
                 <span class="option-details">
@@ -86,6 +88,7 @@
                     data-brand="{{ item.brand or '' }}"
                     data-price="{{ item.price or '' }}"
                     data-image-url="{{ item.image_url or '' }}"
+                    data-item-id="{{ item.item_id or '' }}"
                 >
                 {% if item.image_url %}<img src="{{ item.image_url }}" alt="" class="option-thumb">{% endif %}
                 <span class="option-details">

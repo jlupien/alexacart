@@ -132,17 +132,17 @@ async def add_product_from_url(
     db: Session = Depends(get_db),
 ):
     """Add a preferred product by fetching details from an Instacart URL."""
-    from alexacart.instacart.agent import InstacartAgent
+    from alexacart.instacart.auth import ensure_valid_session
+    from alexacart.instacart.client import InstacartClient
 
     item = db.get(GroceryItem, item_id)
     if not item:
         return HTMLResponse('<div class="status-message status-error">Item not found</div>', status_code=404)
 
-    agent = InstacartAgent(headless=True)
+    client = InstacartClient(await ensure_valid_session())
     try:
-        result = await agent.check_product_by_url_fast(url)
-        if result is None:
-            result = await agent.check_product_by_url(url)
+        await client.init_session()
+        result = await client.get_product_details(url)
         if not result:
             return HTMLResponse(
                 _render_item(request, item, url_error="Could not find a product at that URL.")
@@ -162,7 +162,7 @@ async def add_product_from_url(
             _render_item(request, item, url_error=f"Error fetching URL: {e}")
         )
     finally:
-        await agent.close()
+        await client.close()
 
 
 @router.post("/products/{product_id}/move-up", response_class=HTMLResponse)

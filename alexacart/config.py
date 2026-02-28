@@ -7,15 +7,13 @@ _BASE_DIR = Path(__file__).resolve().parent.parent
 
 class Settings(BaseSettings):
     alexa_list_name: str = "Grocery List"
-    browser_use_api_key: str = ""
     instacart_store: str = "Wegmans"
-    search_concurrency: int = 4
     skip_alexa_checkoff: bool = False
     debug_clear_amazon_cookies: bool = False
     debug_clear_instacart_cookies: bool = False
     data_dir: str = ""
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     @property
     def base_dir(self) -> Path:

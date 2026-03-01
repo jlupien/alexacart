@@ -468,12 +468,27 @@ def _kill_chrome_for_profile(profile_dir: Path) -> bool:
         pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
         if not pids:
             return False
-        logger.info("Killing %d lingering Chrome process(es)", len(pids))
-        subprocess.run(["kill"] + pids, capture_output=True)
+        logger.info("Killing %d lingering Chrome process(es): %s", len(pids), pids)
+        subprocess.run(["kill", "-9"] + pids, capture_output=True)
         return True
     except Exception as e:
         logger.debug("Chrome cleanup: %s", e)
         return False
+
+
+def _clean_profile_locks(profile_dir: Path) -> bool:
+    """Remove Chrome profile lock files that prevent new instances from starting."""
+    cleaned = False
+    for lock_name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        lock_path = profile_dir / lock_name
+        if lock_path.exists() or lock_path.is_symlink():
+            try:
+                lock_path.unlink()
+                logger.info("Removed stale lock file: %s", lock_name)
+                cleaned = True
+            except OSError as e:
+                logger.debug("Could not remove %s: %s", lock_name, e)
+    return cleaned
 
 
 async def _start_browser(profile_dir: Path, headless: bool = True):
@@ -482,8 +497,11 @@ async def _start_browser(profile_dir: Path, headless: bool = True):
 
     for attempt in range(3):
         killed = _kill_chrome_for_profile(profile_dir)
+        locks_cleaned = _clean_profile_locks(profile_dir)
         if killed or attempt > 0:
             await asyncio.sleep(2)
+        elif locks_cleaned:
+            await asyncio.sleep(1)
         try:
             browser = await uc.start(
                 user_data_dir=str(profile_dir),

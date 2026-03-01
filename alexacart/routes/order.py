@@ -201,7 +201,7 @@ async def _run_order(session: OrderSession):
         # Step 2: Fetch Alexa shopping list
         session.status_detail = "Fetching your Alexa shopping list..."
         alexa_client = AlexaClient(
-            cookie_refresh_fn=lambda: refresh_cookies_via_token(),
+            cookie_refresh_fn=lambda: extract_cookies_via_nodriver(on_status=on_status),
             interactive_cookie_refresh_fn=lambda: extract_cookies_via_nodriver(
                 on_status=on_status,
                 force_relogin=True,
@@ -905,7 +905,7 @@ async def _run_commit(session: OrderSession):
         await client.init_session()
 
     alexa_client = AlexaClient(
-        cookie_refresh_fn=lambda: refresh_cookies_via_token(),
+        cookie_refresh_fn=lambda: extract_cookies_via_nodriver(),
         interactive_cookie_refresh_fn=lambda: extract_cookies_via_nodriver(
             force_relogin=True,
         ),

@@ -371,6 +371,52 @@ async def _extract_and_save_cookies(browser, _status) -> dict:
     return result
 
 
+def _kill_chrome_for_profile(profile_dir: Path) -> bool:
+    """Kill any lingering Chrome processes using the specified profile directory."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", f"--user-data-dir={profile_dir}"],
+            capture_output=True,
+            text=True,
+        )
+        pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
+        if not pids:
+            return False
+        logger.info("Killing %d lingering Chrome process(es)", len(pids))
+        subprocess.run(["kill"] + pids, capture_output=True)
+        return True
+    except Exception as e:
+        logger.debug("Chrome cleanup: %s", e)
+        return False
+
+
+async def _start_browser(profile_dir: Path, headless: bool = True):
+    """Start nodriver with retry and zombie Chrome cleanup."""
+    import nodriver as uc
+
+    for attempt in range(3):
+        killed = _kill_chrome_for_profile(profile_dir)
+        if killed or attempt > 0:
+            await asyncio.sleep(2)
+        try:
+            browser = await uc.start(
+                user_data_dir=str(profile_dir),
+                headless=headless,
+            )
+            return browser
+        except Exception as e:
+            logger.warning(
+                "nodriver start (attempt %d/3, headless=%s): %s",
+                attempt + 1,
+                headless,
+                e,
+            )
+            if attempt == 2:
+                raise
+
+
 async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> dict:
     """
     Open an undetectable Chrome instance via nodriver, ensure the user is
@@ -388,8 +434,6 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
     Returns cookie data dict with 'cookies' key.
     """
     import shutil
-
-    import nodriver as uc
 
     def _status(msg):
         logger.info(msg)
@@ -425,10 +469,7 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
     if force_relogin:
         # Skip headless check — open visible browser and force a fresh login
         _status("Session expired — opening Amazon for re-login...")
-        browser = await uc.start(
-            user_data_dir=str(profile_dir),
-            headless=False,
-        )
+        browser = await _start_browser(profile_dir, headless=False)
         try:
             # Sign out first to clear the stale session
             page = await browser.get("https://www.amazon.com/gp/flex/sign-out.html")
@@ -469,10 +510,7 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
 
     # Normal mode: start headless — only open a visible window if login is actually needed
     _status("Checking Amazon login...")
-    browser = await uc.start(
-        user_data_dir=str(profile_dir),
-        headless=True,
-    )
+    browser = await _start_browser(profile_dir, headless=True)
 
     try:
         # Try OAuth flow first — navigate to OAuth URL
@@ -518,19 +556,7 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         browser.stop()
         await asyncio.sleep(2)
         _status("Login needed — opening Amazon login window...")
-        for attempt in range(3):
-            try:
-                browser = await uc.start(
-                    user_data_dir=str(profile_dir),
-                    headless=False,
-                )
-                break
-            except Exception as e:
-                if attempt < 2:
-                    logger.warning("nodriver start attempt %d failed: %s, retrying...", attempt + 1, e)
-                    await asyncio.sleep(3)
-                else:
-                    raise
+        browser = await _start_browser(profile_dir, headless=False)
         page = await browser.get(oauth_url)
         await page.sleep(2)
 

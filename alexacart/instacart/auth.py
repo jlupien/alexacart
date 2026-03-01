@@ -624,6 +624,23 @@ async def extract_session_via_nodriver(on_status=None) -> dict:
 
         logger.info("Extracted %d Instacart cookies: %s", len(cookies), sorted(cookies.keys()))
 
+        # Preserve cached session params if the new extraction came back empty.
+        # nodriver sometimes fails to extract params (SPA not fully loaded),
+        # but the params are store-specific constants that don't change.
+        cached = load_instacart_cookies()
+        if cached:
+            cached_params = cached.get("session_params", {})
+            param_keys = ("shop_id", "zone_id", "postal_code",
+                          "retailer_location_id", "retailer_inventory_session_token",
+                          "address_id")
+            preserved = []
+            for key in param_keys:
+                if not session_params.get(key) and cached_params.get(key):
+                    session_params[key] = cached_params[key]
+                    preserved.append(key)
+            if preserved:
+                logger.info("Preserved cached session params: %s", preserved)
+
         data = {
             "cookies": cookies,
             "session_params": session_params,

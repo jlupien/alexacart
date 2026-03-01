@@ -357,11 +357,13 @@ class InstacartClient:
         return items, item_ids
 
     async def _discover_session_context(self):
-        """Discover address_id and missing session params by fetching the store page.
+        """Best-effort discovery of address_id and session params via httpx.
 
-        Parses __NEXT_DATA__ and inline scripts from the server-rendered HTML.
-        This avoids requiring nodriver re-extraction — one httpx GET fills in
-        both address_id (for ActiveCartId) and session params (for searches).
+        Instacart is a fully client-rendered SPA, so most session params
+        (shopId, zoneId, postalCode) are NOT in the server-rendered HTML.
+        This primarily helps discover address_id and location_id from
+        inline scripts. The main param source remains nodriver extraction
+        (saved in instacart_cookies.json).
         """
         if not self._retailer_slug:
             return
@@ -369,11 +371,9 @@ class InstacartClient:
         try:
             resp = await self._client.get(url, follow_redirects=True)
             if resp.status_code != 200:
-                logger.debug("Store page returned %d for session context discovery", resp.status_code)
                 return
             html = resp.text
 
-            # Discover address_id
             if not self._address_id:
                 m = re.search(r'"addressId"\s*:\s*"(\d+)"', html)
                 if not m:
@@ -382,8 +382,7 @@ class InstacartClient:
                     self._address_id = m.group(1)
                     logger.info("Discovered address_id via httpx: %s", self._address_id)
 
-            # Discover missing session params from page HTML
-            # Maps (attribute_name, regex_pattern) — attribute names match self._*
+            # Best-effort regex scan for any params present in HTML
             param_patterns = [
                 ("_shop_id", r'"shopId"\s*:\s*"(\d+)"'),
                 ("_zone_id", r'"zoneId"\s*:\s*"(\d+)"'),

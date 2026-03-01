@@ -97,7 +97,13 @@ class InstacartClient:
             self._client = None
 
     async def init_session(self):
-        """Discover cart ID and validate session."""
+        """Discover cart ID and validate session.
+
+        If a cart_id was loaded from saved data, validate it's a family cart
+        (has householdId). Stale personal carts are invisible on instacart.com.
+        """
+        if self._cart_id:
+            await self._validate_cart_id()
         if not self._cart_id:
             await self._discover_cart_id()
 
@@ -338,21 +344,61 @@ class InstacartClient:
 
         return items, item_ids
 
+    async def _validate_cart_id(self):
+        """Check that the stored cart_id is a family cart (has householdId).
+
+        If PersonalActiveCarts doesn't return it or it has no householdId,
+        clear it so _discover_cart_id can find a proper family cart.
+        """
+        try:
+            carts = await self.get_active_carts()
+            for cart in carts:
+                if cart.get("id") == self._cart_id:
+                    if cart.get("householdId"):
+                        logger.info(
+                            "Validated cart %s is a family cart (household=%s)",
+                            self._cart_id, cart["householdId"],
+                        )
+                        return
+                    else:
+                        logger.warning(
+                            "Stored cart %s is a personal cart (no householdId) — clearing",
+                            self._cart_id,
+                        )
+                        self._cart_id = ""
+                        return
+            # Cart not found in active carts (may have been emptied/deleted)
+            logger.info("Stored cart %s not found in active carts — clearing", self._cart_id)
+            self._cart_id = ""
+        except Exception as e:
+            logger.warning("Failed to validate cart ID: %s", e)
+
     async def _discover_cart_id(self):
         try:
             carts = await self.get_active_carts()
             logger.info(
                 "PersonalActiveCarts returned %d carts: %s",
                 len(carts),
-                [(c.get("id"), c.get("retailer", {}).get("slug")) for c in carts],
+                [
+                    (c.get("id"), c.get("retailer", {}).get("slug"), c.get("householdId"))
+                    for c in carts
+                ],
             )
             for cart in carts:
                 slug = cart.get("retailer", {}).get("slug", "").lower()
                 if slug == self._retailer_slug:
+                    # Prefer family/household carts — skip personal carts
+                    # (carts without householdId) since those are invisible
+                    # to other household members on the Instacart website.
+                    if not cart.get("householdId"):
+                        logger.info(
+                            "Skipping personal cart %s (no householdId)", cart["id"],
+                        )
+                        continue
                     self._cart_id = cart["id"]
                     logger.info("Discovered cart ID: %s for %s", self._cart_id, self._retailer_slug)
                     return
-            logger.warning("No active cart found for %s", self._retailer_slug)
+            logger.warning("No active family cart found for %s", self._retailer_slug)
         except Exception as e:
             logger.warning("Failed to discover cart ID: %s", e)
 

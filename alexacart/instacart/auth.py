@@ -130,7 +130,10 @@ _JS_DISCOVER_CART_ID = """
             var cart = cartList[i];
             var retailer = cart.retailer || {};
             if ((retailer.slug || '').toLowerCase() === slug) {
-                return JSON.stringify({cart_id: cart.id, all_carts: cartList.length});
+                // Only return family/household carts — personal carts (no householdId)
+                // are invisible to other household members on instacart.com
+                if (!cart.householdId) continue;
+                return JSON.stringify({cart_id: cart.id, household_id: cart.householdId, all_carts: cartList.length});
             }
         }
         return JSON.stringify({cart_id: null, all_carts: cartList.length});
@@ -189,30 +192,69 @@ _JS_CREATE_CART = """
 })()
 """
 
-# Extract the first item_id from the search results page via Performance API
+# Search for "milk" via the GraphQL API from within the browser and return
+# the first item_id from the results. Uses fetch (not Performance API) for
+# reliability — the Performance API entries may not include all XHR requests.
 _JS_GET_FIRST_ITEM_ID = """
-(function() {
-    var entries = performance.getEntriesByType('resource');
-    for (var i = 0; i < entries.length; i++) {
-        var name = entries[i].name;
-        if (name.indexOf('graphql') >= 0 && name.indexOf('operationName=Items') >= 0) {
-            try {
-                var url = new URL(name);
-                var vars = JSON.parse(decodeURIComponent(url.searchParams.get('variables')));
-                if (vars.ids && vars.ids.length > 0) return vars.ids[0];
-            } catch(e) {}
+(async function() {
+    var shopId = "%SHOP_ID%";
+    var postalCode = "%POSTAL_CODE%";
+    var zoneId = "%ZONE_ID%";
+    var locationId = "%LOCATION_ID%";
+    var searchHash = "521b48a91cb45d5ce14457b8548ae4592e947136cebef056b8b350fe078d92ec";
+    var itemsHash = "5116339819ff07f207fd38f949a8a7f58e52cc62223b535405b087e3076ebf2f";
+
+    // Search for a common product
+    var searchVars = {
+        query: "milk", shopId: shopId, postalCode: postalCode, zoneId: zoneId,
+        first: 3, pageViewId: crypto.randomUUID(), searchSource: "search",
+        orderBy: "bestMatch", filters: [], action: null, elevatedProductId: null,
+        disableReformulation: false, disableLlm: false, forceInspiration: false,
+        clusterId: null, includeDebugInfo: false, clusteringStrategy: null,
+        contentManagementSearchParams: {itemGridColumnCount: 4}
+    };
+    var resp = await fetch(
+        '/graphql?operationName=SearchResultsPlacements'
+        + '&variables=' + encodeURIComponent(JSON.stringify(searchVars))
+        + '&extensions=' + encodeURIComponent(JSON.stringify({persistedQuery: {version: 1, sha256Hash: searchHash}})),
+        {headers: {"x-client-identifier": "web"}}
+    );
+    var data = await resp.json();
+    var placements = ((data.data || {}).searchResultsPlacements || {}).placements || [];
+
+    // Try to get item_ids from search results
+    for (var i = 0; i < placements.length; i++) {
+        var content = placements[i].content || {};
+        var typename = content.__typename || '';
+        if (typename.indexOf('Ads') === 0) continue;
+        var itemIds = content.itemIds || [];
+        if (itemIds.length > 0) return itemIds[0];
+        var items = content.items || [];
+        if (items.length > 0 && items[0].id) return items[0].id;
+    }
+
+    // Fallback: construct item_id from search results product IDs
+    for (var i = 0; i < placements.length; i++) {
+        var content = placements[i].content || {};
+        var items = content.items || [];
+        for (var j = 0; j < items.length; j++) {
+            var pid = items[j].productId;
+            if (pid && locationId) return 'items_' + locationId + '-' + pid;
         }
     }
+
     return null;
 })()
 """
 
 
-async def _discover_cart_id_from_browser(page, store_slug: str) -> str | None:
+async def _discover_cart_id_from_browser(
+    page, store_slug: str, session_params: dict,
+) -> str | None:
     """Discover or create the cart ID from within the browser context.
 
     The browser has the correct household/session context, so any cart
-    created here will be a household cart — not an orphan personal cart.
+    created here will be a household/family cart — not an orphan personal cart.
 
     Strategy:
     1. Try PersonalActiveCarts — returns existing carts (only non-empty ones)
@@ -238,12 +280,19 @@ async def _discover_cart_id_from_browser(page, store_slug: str) -> str | None:
 
     # No existing cart — create one by adding+removing a temporary item
     logger.info("No existing cart for %s, creating via browser context...", store_slug)
-    item_id = await _run_js(page, _JS_GET_FIRST_ITEM_ID)
+    get_item_js = (
+        _JS_GET_FIRST_ITEM_ID
+        .replace("%SHOP_ID%", session_params.get("shop_id", ""))
+        .replace("%POSTAL_CODE%", session_params.get("postal_code", ""))
+        .replace("%ZONE_ID%", session_params.get("zone_id", ""))
+        .replace("%LOCATION_ID%", session_params.get("retailer_location_id", ""))
+    )
+    item_id = await _run_js(page, get_item_js)
     if not item_id:
         logger.warning("Could not find an item_id to create cart")
         return None
 
-    logger.info("Creating cart with temporary item: %s", item_id)
+    logger.info("Creating family cart with temporary item: %s", item_id)
     create_js = _JS_CREATE_CART.replace("%ITEM_ID%", item_id)
     raw = await _run_js(page, create_js)
     if not raw:
@@ -254,7 +303,7 @@ async def _discover_cart_id_from_browser(page, store_slug: str) -> str | None:
         if result.get("error"):
             logger.warning("Cart creation error: %s", result["error"])
             return None
-        logger.info("Created cart via browser: %s", result.get("cart_id"))
+        logger.info("Created family cart via browser: %s", result.get("cart_id"))
         return result.get("cart_id")
     except (json.JSONDecodeError, TypeError):
         return None
@@ -411,7 +460,7 @@ async def extract_session_via_nodriver(on_status=None) -> dict:
         # PersonalActiveCarts will return household carts that may not
         # appear when queried via plain httpx.
         _status("Discovering cart ID...")
-        cart_id = await _discover_cart_id_from_browser(page, store_slug)
+        cart_id = await _discover_cart_id_from_browser(page, store_slug, session_params)
         if cart_id:
             logger.info("Discovered cart ID from browser: %s", cart_id)
         else:

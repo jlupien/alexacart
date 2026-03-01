@@ -111,6 +111,155 @@ _JS_EXTRACT_FROM_PAGE = """
 """
 
 
+_JS_DISCOVER_CART_ID = """
+(async function() {
+    var slug = "%STORE_SLUG%";
+    try {
+        var resp = await fetch(
+            '/graphql?operationName=PersonalActiveCarts'
+            + '&variables=' + encodeURIComponent('{}')
+            + '&extensions=' + encodeURIComponent(JSON.stringify({
+                persistedQuery: {version: 1, sha256Hash: "eac9d17bd45b099fbbdabca2e111acaf2a4fa486f2ce5bc4e8acbab2f31fd8c0"}
+            })),
+            {headers: {"x-client-identifier": "web"}}
+        );
+        var data = await resp.json();
+        var carts = (data.data || {}).userCarts || {};
+        var cartList = carts.carts || [];
+        for (var i = 0; i < cartList.length; i++) {
+            var cart = cartList[i];
+            var retailer = cart.retailer || {};
+            if ((retailer.slug || '').toLowerCase() === slug) {
+                return JSON.stringify({cart_id: cart.id, all_carts: cartList.length});
+            }
+        }
+        return JSON.stringify({cart_id: null, all_carts: cartList.length});
+    } catch(e) {
+        return JSON.stringify({error: e.message});
+    }
+})()
+"""
+
+# Create a cart by adding a temporary item from within the browser context.
+# The browser has the correct household/family context, so the created cart
+# will be a household cart (not an orphan personal cart).
+# We then immediately remove the item, keeping just the cart ID.
+_JS_CREATE_CART = """
+(async function() {
+    var itemId = "%ITEM_ID%";
+    var mutHash = "7c2c63093a07a61b056c09be23eba6f5790059dca8179f7af7580c0456b1049f";
+
+    // Add a temporary item to force cart creation
+    var addResp = await fetch('/graphql?operationName=UpdateCartItemsMutation', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'x-client-identifier': 'web'},
+        body: JSON.stringify({
+            operationName: 'UpdateCartItemsMutation',
+            variables: {
+                cartItemUpdates: [{itemId: itemId, quantity: 1, quantityType: 'each'}],
+                cartType: 'grocery',
+                requestTimestamp: Date.now()
+            },
+            extensions: {persistedQuery: {version: 1, sha256Hash: mutHash}}
+        })
+    });
+    var addData = await addResp.json();
+    var result = (addData.data || {}).updateCartItems || {};
+    var cart = result.cart || {};
+    var cartId = cart.id;
+    if (!cartId) return JSON.stringify({error: 'no cart id in add response', raw: JSON.stringify(result).substring(0, 500)});
+
+    // Remove the temporary item (set quantity to 0)
+    await fetch('/graphql?operationName=UpdateCartItemsMutation', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'x-client-identifier': 'web'},
+        body: JSON.stringify({
+            operationName: 'UpdateCartItemsMutation',
+            variables: {
+                cartItemUpdates: [{itemId: itemId, quantity: 0, quantityType: 'each'}],
+                cartType: 'grocery',
+                requestTimestamp: Date.now(),
+                cartId: cartId
+            },
+            extensions: {persistedQuery: {version: 1, sha256Hash: mutHash}}
+        })
+    });
+
+    return JSON.stringify({cart_id: cartId});
+})()
+"""
+
+# Extract the first item_id from the search results page via Performance API
+_JS_GET_FIRST_ITEM_ID = """
+(function() {
+    var entries = performance.getEntriesByType('resource');
+    for (var i = 0; i < entries.length; i++) {
+        var name = entries[i].name;
+        if (name.indexOf('graphql') >= 0 && name.indexOf('operationName=Items') >= 0) {
+            try {
+                var url = new URL(name);
+                var vars = JSON.parse(decodeURIComponent(url.searchParams.get('variables')));
+                if (vars.ids && vars.ids.length > 0) return vars.ids[0];
+            } catch(e) {}
+        }
+    }
+    return null;
+})()
+"""
+
+
+async def _discover_cart_id_from_browser(page, store_slug: str) -> str | None:
+    """Discover or create the cart ID from within the browser context.
+
+    The browser has the correct household/session context, so any cart
+    created here will be a household cart — not an orphan personal cart.
+
+    Strategy:
+    1. Try PersonalActiveCarts — returns existing carts (only non-empty ones)
+    2. If no matching cart, add+remove a temporary item to force cart creation,
+       then extract the cart ID from the mutation response
+    """
+    js = _JS_DISCOVER_CART_ID.replace("%STORE_SLUG%", store_slug)
+    raw = await _run_js(page, js)
+    if raw:
+        try:
+            result = json.loads(raw)
+            if result.get("error"):
+                logger.warning("Browser cart discovery error: %s", result["error"])
+            else:
+                logger.info(
+                    "Browser cart discovery: cart_id=%s, total_carts=%s",
+                    result.get("cart_id"), result.get("all_carts"),
+                )
+                if result.get("cart_id"):
+                    return result["cart_id"]
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # No existing cart — create one by adding+removing a temporary item
+    logger.info("No existing cart for %s, creating via browser context...", store_slug)
+    item_id = await _run_js(page, _JS_GET_FIRST_ITEM_ID)
+    if not item_id:
+        logger.warning("Could not find an item_id to create cart")
+        return None
+
+    logger.info("Creating cart with temporary item: %s", item_id)
+    create_js = _JS_CREATE_CART.replace("%ITEM_ID%", item_id)
+    raw = await _run_js(page, create_js)
+    if not raw:
+        logger.warning("Cart creation returned no result")
+        return None
+    try:
+        result = json.loads(raw)
+        if result.get("error"):
+            logger.warning("Cart creation error: %s", result["error"])
+            return None
+        logger.info("Created cart via browser: %s", result.get("cart_id"))
+        return result.get("cart_id")
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
 async def _run_js(page, js_code: str) -> str | None:
     """Execute JavaScript on a nodriver page and return the string result."""
     try:
@@ -257,6 +406,17 @@ async def extract_session_via_nodriver(on_status=None) -> dict:
         # Extract session params
         session_params = await _extract_session_params(page, store_slug)
 
+        # Discover cart ID from within the browser context.
+        # The browser has the correct household/family context, so
+        # PersonalActiveCarts will return household carts that may not
+        # appear when queried via plain httpx.
+        _status("Discovering cart ID...")
+        cart_id = await _discover_cart_id_from_browser(page, store_slug)
+        if cart_id:
+            logger.info("Discovered cart ID from browser: %s", cart_id)
+        else:
+            logger.warning("No cart ID discovered from browser for %s", store_slug)
+
         # Extract cookies
         all_cookies = await browser.cookies.get_all()
         cookies = {}
@@ -272,6 +432,7 @@ async def extract_session_via_nodriver(on_status=None) -> dict:
         data = {
             "cookies": cookies,
             "session_params": session_params,
+            "cart_id": cart_id or "",
             "extracted_at": datetime.now(UTC).isoformat(),
         }
         save_instacart_cookies(data)
@@ -289,5 +450,8 @@ async def ensure_valid_session() -> dict:
     """Load cached session or extract a new one via nodriver."""
     data = load_instacart_cookies()
     if data and data.get("cookies"):
-        return data
+        if data.get("cart_id"):
+            return data
+        # Cookies exist but no cart_id — re-run nodriver to discover it
+        logger.info("Cached Instacart session has no cart_id — re-extracting via nodriver")
     return await extract_session_via_nodriver()

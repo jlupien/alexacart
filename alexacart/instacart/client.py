@@ -9,6 +9,7 @@ This replaces the previous browser-use approach (LLM-powered browser automation)
 with reliable, fast API calls.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -82,6 +83,7 @@ class InstacartClient:
         self._inventory_token = params.get("retailer_inventory_session_token", "")
         self._retailer_slug = params.get("retailer_slug", settings.instacart_store.lower())
         self._cart_id = session_data.get("cart_id", "")
+        self._cart_lock = asyncio.Lock()
 
         cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
         self._client = httpx.AsyncClient(
@@ -268,10 +270,16 @@ class InstacartClient:
 
     async def add_to_cart(self, item_id: str, quantity: int = 1) -> bool:
         """Add a product to the Instacart cart by item_id."""
+        # Use a lock to ensure only one concurrent caller discovers/creates
+        # the cart — prevents multiple orphan carts when items are added in
+        # parallel via asyncio.gather.
         if not self._cart_id:
-            await self._discover_cart_id()
+            async with self._cart_lock:
+                if not self._cart_id:
+                    await self._discover_cart_id()
+
         if not self._cart_id:
-            logger.error("Cannot add to cart — no cart ID")
+            logger.error("Cannot add to cart — no cart ID discovered")
             return False
 
         variables = {
@@ -294,7 +302,7 @@ class InstacartClient:
             if "Success" in typename:
                 logger.info("Added %s to cart (qty=%d)", item_id, quantity)
                 return True
-            logger.warning("Add to cart response type: %s", typename)
+            logger.warning("Add to cart response type: %s — full response: %s", typename, json.dumps(result)[:500])
             return False
         except Exception as e:
             logger.error("Add to cart failed for %s: %s", item_id, e)
@@ -333,6 +341,11 @@ class InstacartClient:
     async def _discover_cart_id(self):
         try:
             carts = await self.get_active_carts()
+            logger.info(
+                "PersonalActiveCarts returned %d carts: %s",
+                len(carts),
+                [(c.get("id"), c.get("retailer", {}).get("slug")) for c in carts],
+            )
             for cart in carts:
                 slug = cart.get("retailer", {}).get("slug", "").lower()
                 if slug == self._retailer_slug:

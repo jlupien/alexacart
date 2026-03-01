@@ -129,7 +129,7 @@ async def start_order(request: Request):
 
 async def _run_order(session: OrderSession):
     """Background task: check logins, fetch Alexa list, then search Instacart."""
-    from alexacart.alexa.auth import extract_cookies_via_nodriver, refresh_cookies_via_token
+    from alexacart.alexa.auth import extract_cookies_via_nodriver, refresh_cookies_via_token, validate_alexa_cookies
     from alexacart.alexa.client import AlexaClient
     from alexacart.instacart.auth import ensure_valid_session, extract_session_via_nodriver
     from alexacart.instacart.client import InstacartClient
@@ -158,12 +158,19 @@ async def _run_order(session: OrderSession):
 
             existing_cookies = load_cookies()
             if existing_cookies:
-                logger.info("Using existing Amazon cookies (no refresh token, will retry on 401)")
-                on_status("Using cached Amazon cookies")
-                instacart_data = await ensure_valid_session()
-                cookie_data = existing_cookies
-            else:
-                # No cookies at all — need nodriver for initial login
+                on_status("Validating cached Amazon cookies...")
+                cookies_valid = await validate_alexa_cookies(existing_cookies)
+                if cookies_valid:
+                    logger.info("Existing Amazon cookies are valid (no refresh token)")
+                    on_status("Using cached Amazon cookies")
+                    instacart_data = await ensure_valid_session()
+                    cookie_data = existing_cookies
+                else:
+                    logger.info("Existing Amazon cookies are stale, going to nodriver")
+                    on_status("Cookies expired — re-authenticating...")
+                    existing_cookies = None  # fall through to nodriver path below
+            if not existing_cookies:
+                # No cookies at all (or stale) — need nodriver for initial login
                 logger.info("No Amazon cookies available, using nodriver for auth")
                 on_status("Authenticating...")
                 instacart_result, amazon_result = await asyncio.gather(

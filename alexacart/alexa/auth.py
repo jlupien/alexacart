@@ -36,6 +36,12 @@ OS_VERSION = "18.3.1"
 SOFTWARE_VERSION = "1"
 
 
+def _is_on_maplanding(url: str) -> bool:
+    """Check if URL path is the OAuth maplanding redirect (not just a query param match)."""
+    from urllib.parse import urlparse
+    return "/ap/maplanding" in urlparse(url).path
+
+
 def _cookies_path() -> Path:
     return settings.cookies_path
 
@@ -366,7 +372,7 @@ async def _wait_for_oauth_redirect(
             return code
         # Also check if user navigated away from the login flow
         url = page.url or ""
-        if "maplanding" in url:
+        if _is_on_maplanding(url):
             # We're on the maplanding page but no auth code in the URL.
             # Give it a couple polls in case the page is still loading/redirecting,
             # then bail — the user sees a blank/404 page otherwise.
@@ -586,7 +592,7 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         # Check if we ended up on maplanding (user was already logged in,
         # OAuth redirected but auth code wasn't in the URL)
         page_url = page.url or ""
-        if "maplanding" in page_url:
+        if _is_on_maplanding(page_url):
             # Check interceptor — may have captured code from a redirect we missed
             if captured_codes:
                 auth_code = captured_codes[0]
@@ -655,6 +661,37 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
             browser.stop()
         except Exception:
             pass
+
+
+async def validate_alexa_cookies(cookie_data: dict) -> bool:
+    """
+    Quick check: hit the Alexa API with the given cookies and return True if 200.
+
+    Used to detect stale cookies upfront instead of discovering it mid-flow
+    after wasting time on 401 retries and nodriver launches.
+    """
+    headers = {
+        **get_cookie_header(cookie_data),
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 13_5_1 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
+            "PitanguiBridge/2.2.345247.0-[HARDWARE=iPhone10_4][SOFTWARE=13.5.1]"
+        ),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                "https://www.amazon.com/alexashoppinglists/api/getlistitems",
+                headers=headers,
+            )
+            if resp.status_code == 200:
+                logger.info("Cookie validation: OK (200)")
+                return True
+            logger.info("Cookie validation: failed (%d)", resp.status_code)
+            return False
+    except Exception as e:
+        logger.warning("Cookie validation error: %s", e)
+        return False
 
 
 async def ensure_valid_cookies() -> dict:

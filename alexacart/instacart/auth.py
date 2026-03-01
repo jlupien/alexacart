@@ -505,7 +505,16 @@ async def extract_session_via_nodriver(on_status=None) -> dict:
     search_url = f"{INSTACART_BASE}/store/{store_slug}/s?k=milk"
 
     _status("Checking Instacart login...")
-    browser = await uc.start(user_data_dir=str(profile_dir), headless=True)
+    for attempt in range(3):
+        try:
+            browser = await uc.start(user_data_dir=str(profile_dir), headless=True)
+            break
+        except Exception as e:
+            if attempt < 2:
+                logger.warning("nodriver headless start attempt %d failed: %s", attempt + 1, e)
+                await asyncio.sleep(2)
+            else:
+                raise
 
     try:
         page = await browser.get(store_url)

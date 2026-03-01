@@ -152,32 +152,44 @@ async def _run_order(session: OrderSession):
             instacart_data = await ensure_valid_session()
             cookie_data = token_cookie_data
         else:
-            # No refresh token or token expired — run both auths
-            logger.info("Token refresh unavailable, using nodriver for Amazon auth")
-            on_status("Authenticating...")
-            instacart_result, amazon_result = await asyncio.gather(
-                ensure_valid_session(),
-                extract_cookies_via_nodriver(on_status=on_status),
-                return_exceptions=True,
-            )
+            # Check if we have existing cookies that might still be valid.
+            # The AlexaClient handles 401 retries with cookie refresh callbacks,
+            # so we only need nodriver upfront if there are NO cookies at all.
+            from alexacart.alexa.auth import load_cookies
 
-            if isinstance(instacart_result, Exception):
-                logger.error("Instacart auth failed: %s", instacart_result, exc_info=True)
-                session.error = f"Instacart login failed: {instacart_result}"
-                session.status = "error"
-                return
-            instacart_data = instacart_result
+            existing_cookies = load_cookies()
+            if existing_cookies:
+                logger.info("Using existing Amazon cookies (no refresh token, will retry on 401)")
+                on_status("Using cached Amazon cookies")
+                instacart_data = await ensure_valid_session()
+                cookie_data = existing_cookies
+            else:
+                # No cookies at all — need nodriver for initial login
+                logger.info("No Amazon cookies available, using nodriver for auth")
+                on_status("Authenticating...")
+                instacart_result, amazon_result = await asyncio.gather(
+                    ensure_valid_session(),
+                    extract_cookies_via_nodriver(on_status=on_status),
+                    return_exceptions=True,
+                )
 
-            if isinstance(amazon_result, Exception):
-                logger.error("nodriver cookie extraction failed: %s", amazon_result, exc_info=True)
-                session.error = f"Amazon authentication failed: {amazon_result}"
-                session.status = "error"
-                return
-            cookie_data = amazon_result
-            if not cookie_data or not cookie_data.get("cookies"):
-                session.error = "Could not extract Amazon cookies. Please try again."
-                session.status = "error"
-                return
+                if isinstance(instacart_result, Exception):
+                    logger.error("Instacart auth failed: %s", instacart_result, exc_info=True)
+                    session.error = f"Instacart login failed: {instacart_result}"
+                    session.status = "error"
+                    return
+                instacart_data = instacart_result
+
+                if isinstance(amazon_result, Exception):
+                    logger.error("nodriver cookie extraction failed: %s", amazon_result, exc_info=True)
+                    session.error = f"Amazon authentication failed: {amazon_result}"
+                    session.status = "error"
+                    return
+                cookie_data = amazon_result
+                if not cookie_data or not cookie_data.get("cookies"):
+                    session.error = "Could not extract Amazon cookies. Please try again."
+                    session.status = "error"
+                    return
 
         # Create Instacart client
         client = InstacartClient(instacart_data)

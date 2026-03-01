@@ -264,9 +264,16 @@ class InstacartClient:
                 if fetched[0].image_url:
                     image_url = fetched[0].image_url
 
+        # Build canonical product URL with retailerSlug
+        canonical_url = None
+        if slug:
+            canonical_url = f"https://www.instacart.com/products/{slug}"
+            if self._retailer_slug:
+                canonical_url += f"?retailerSlug={self._retailer_slug}"
+
         return ProductResult(
             product_name=name,
-            product_url=product_url,
+            product_url=canonical_url or product_url,
             brand=brand or None,
             price=price,
             image_url=image_url or None,
@@ -485,10 +492,9 @@ class InstacartClient:
         evergreen_url = item.get("evergreenUrl", "")
         product_url = None
         if evergreen_url:
+            product_url = f"https://www.instacart.com/products/{evergreen_url}"
             if self._retailer_slug:
-                product_url = f"https://www.instacart.com/store/{self._retailer_slug}/product_page/{evergreen_url}"
-            else:
-                product_url = f"https://www.instacart.com/products/{evergreen_url}"
+                product_url += f"?retailerSlug={self._retailer_slug}"
 
         return ProductResult(
             product_name=name,
@@ -504,7 +510,7 @@ class InstacartClient:
 
     @staticmethod
     def _extract_product_slug(url: str) -> str | None:
-        m = re.search(r"/products/([^?#]+)", url)
+        m = re.search(r"/products/([^?#]+)", url) or re.search(r"/product_page/([^?#]+)", url)
         return m.group(1) if m else None
 
     @staticmethod

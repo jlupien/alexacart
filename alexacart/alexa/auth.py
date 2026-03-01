@@ -28,11 +28,13 @@ from alexacart.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Virtual Alexa device constants (mimics the Alexa iOS app)
+# Virtual Alexa device constants (mimics the Alexa iOS app).
+# If Amazon starts rejecting device registration, check the latest Alexa iOS
+# app version in the App Store and update APP_VERSION / OS_VERSION here.
 DEVICE_TYPE = "A2IVLV5VM2W81"
 APP_NAME = "Amazon Alexa"
-APP_VERSION = "2.2.651540.0"
-OS_VERSION = "18.3.1"
+APP_VERSION = "2.2.658990.0"
+OS_VERSION = "26.3"
 SOFTWARE_VERSION = "1"
 
 

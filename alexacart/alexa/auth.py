@@ -310,17 +310,59 @@ async def _try_extract_auth_code(page) -> str | None:
     return _extract_auth_code_from_url(url)
 
 
-async def _wait_for_oauth_redirect(page, timeout_polls: int = 100) -> str | None:
+async def _setup_auth_code_interceptor(page) -> list[str]:
+    """
+    Set up a CDP network interceptor to capture OAuth auth codes from redirects.
+
+    The maplanding redirect URL may only contain the auth code briefly before
+    client-side processing strips it. This interceptor captures every request URL
+    containing the auth code in real-time, regardless of how quickly the page changes.
+
+    Returns a list that gets populated with captured auth codes.
+    """
+    try:
+        import nodriver.cdp.network as network
+
+        captured_codes: list[str] = []
+
+        async def on_request(event: network.RequestWillBeSent):
+            url = event.request.url
+            code = _extract_auth_code_from_url(url)
+            if code and code not in captured_codes:
+                logger.info("Intercepted OAuth auth code from network request to: %s",
+                            url.split("authorization_code=")[0] + "authorization_code=<captured>")
+                captured_codes.append(code)
+
+        page.add_handler(network.RequestWillBeSent, on_request)
+        # Enable the Network domain so CDP fires the events
+        await page.send(network.enable())
+        logger.debug("OAuth redirect interceptor active")
+        return captured_codes
+    except Exception as e:
+        logger.warning("Failed to set up network interceptor: %s", e)
+        return []
+
+
+async def _wait_for_oauth_redirect(
+    page, timeout_polls: int = 100, captured_codes: list[str] | None = None
+) -> str | None:
     """
     Poll the browser page URL waiting for the OAuth redirect to maplanding.
+    Also checks captured_codes from the network interceptor.
     Returns the authorization_code if captured, or None on timeout.
     """
     maplanding_polls = 0
     for _ in range(timeout_polls):  # Up to ~5 minutes
         await page.sleep(3)
+
+        # Check network interceptor first (most reliable)
+        if captured_codes:
+            logger.info("Captured OAuth authorization code via network interceptor")
+            return captured_codes[0]
+
         code = await _try_extract_auth_code(page)
         if code:
-            logger.info("Captured OAuth authorization code")
+            logger.info("Captured OAuth authorization code from page URL")
             return code
         # Also check if user navigated away from the login flow
         url = page.url or ""
@@ -330,11 +372,19 @@ async def _wait_for_oauth_redirect(page, timeout_polls: int = 100) -> str | None
             # then bail — the user sees a blank/404 page otherwise.
             maplanding_polls += 1
             if maplanding_polls >= 2:
+                # Check interceptor one more time
+                if captured_codes:
+                    logger.info("Captured OAuth authorization code via network interceptor (late)")
+                    return captured_codes[0]
                 logger.info("On maplanding page but no auth code captured — moving on")
+                logger.info("Maplanding URL: %s", url)
                 return None
         elif "amazon.com" in url and "/ap/" not in url:
             # User is on amazon.com but not in the auth flow — login succeeded
             # but we missed the redirect (e.g. 2FA or CAPTCHA changed the flow)
+            if captured_codes:
+                logger.info("Captured OAuth authorization code via network interceptor (post-redirect)")
+                return captured_codes[0]
             logger.info("User appears logged in but OAuth redirect not captured")
             return None
     return None
@@ -479,8 +529,9 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
             _status("Please log into Amazon in the browser window...")
             page = await browser.get(oauth_url)
             await page.sleep(2)
+            captured_codes = await _setup_auth_code_interceptor(page)
 
-            auth_code = await _wait_for_oauth_redirect(page)
+            auth_code = await _wait_for_oauth_redirect(page, captured_codes=captured_codes)
             if auth_code:
                 result = await _register_device(auth_code, code_verifier, device_serial)
                 if result:
@@ -516,9 +567,10 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         # Try OAuth flow first — navigate to OAuth URL
         page = await browser.get(oauth_url)
         await page.sleep(2)
+        captured_codes = await _setup_auth_code_interceptor(page)
 
         # Check if the OAuth redirected immediately (user already logged in)
-        auth_code = await _try_extract_auth_code(page)
+        auth_code = captured_codes[0] if captured_codes else await _try_extract_auth_code(page)
         if auth_code:
             _status("Already logged in — registering device...")
             result = await _register_device(auth_code, code_verifier, device_serial)
@@ -535,6 +587,18 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         # OAuth redirected but auth code wasn't in the URL)
         page_url = page.url or ""
         if "maplanding" in page_url:
+            # Check interceptor — may have captured code from a redirect we missed
+            if captured_codes:
+                auth_code = captured_codes[0]
+                logger.info("Captured OAuth auth code via interceptor on maplanding")
+                _status("Already logged in — registering device...")
+                result = await _register_device(auth_code, code_verifier, device_serial)
+                if result:
+                    _status("Device registered — refresh token saved")
+                    return result
+                logger.warning("Device registration failed, falling back to cookie extraction")
+            else:
+                logger.info("On maplanding but no auth code (URL: %s)", page_url)
             _status("Already logged into Amazon")
             page = await browser.get("https://www.amazon.com")
             await page.sleep(2)
@@ -559,9 +623,10 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         browser = await _start_browser(profile_dir, headless=False)
         page = await browser.get(oauth_url)
         await page.sleep(2)
+        captured_codes = await _setup_auth_code_interceptor(page)
 
         _status("Waiting for Amazon login — please log in via the browser window...")
-        auth_code = await _wait_for_oauth_redirect(page)
+        auth_code = await _wait_for_oauth_redirect(page, captured_codes=captured_codes)
         if auth_code:
             result = await _register_device(auth_code, code_verifier, device_serial)
             if result:

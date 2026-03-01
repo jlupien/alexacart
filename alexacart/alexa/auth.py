@@ -324,6 +324,9 @@ async def _setup_auth_code_interceptor(page) -> list[str]:
     client-side processing strips it. This interceptor captures every request URL
     containing the auth code in real-time, regardless of how quickly the page changes.
 
+    Listens to both RequestWillBeSent and ResponseReceived (for 3xx Location
+    headers) to catch the auth code regardless of how Amazon delivers it.
+
     Returns a list that gets populated with captured auth codes.
     """
     try:
@@ -331,18 +334,41 @@ async def _setup_auth_code_interceptor(page) -> list[str]:
 
         captured_codes: list[str] = []
 
+        def _check_url_for_code(url: str, source: str) -> None:
+            """Check a URL for an auth code and log maplanding hits."""
+            if _is_on_maplanding(url) or "authorization_code" in url:
+                code = _extract_auth_code_from_url(url)
+                if code and code not in captured_codes:
+                    logger.info(
+                        "Intercepted OAuth auth code via %s: ...authorization_code=<captured>",
+                        source,
+                    )
+                    captured_codes.append(code)
+                elif not code and _is_on_maplanding(url):
+                    logger.info(
+                        "Maplanding URL seen via %s but NO auth code present. URL: %s",
+                        source,
+                        url,
+                    )
+
         async def on_request(event: network.RequestWillBeSent):
-            url = event.request.url
-            code = _extract_auth_code_from_url(url)
-            if code and code not in captured_codes:
-                logger.info("Intercepted OAuth auth code from network request to: %s",
-                            url.split("authorization_code=")[0] + "authorization_code=<captured>")
-                captured_codes.append(code)
+            _check_url_for_code(event.request.url, "RequestWillBeSent")
+
+        async def on_response(event: network.ResponseReceived):
+            status = event.response.status
+            if 300 <= status < 400:
+                # Check the Location header on redirects
+                location = event.response.headers.get("location", "") if event.response.headers else ""
+                if location:
+                    _check_url_for_code(location, f"ResponseReceived(Location, {status})")
+                # Also check the response URL itself
+                _check_url_for_code(event.response.url, f"ResponseReceived({status})")
 
         page.add_handler(network.RequestWillBeSent, on_request)
+        page.add_handler(network.ResponseReceived, on_response)
         # Enable the Network domain so CDP fires the events
         await page.send(network.enable())
-        logger.debug("OAuth redirect interceptor active")
+        logger.debug("OAuth redirect interceptor active (RequestWillBeSent + ResponseReceived)")
         return captured_codes
     except Exception as e:
         logger.warning("Failed to set up network interceptor: %s", e)
@@ -531,11 +557,11 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
             page = await browser.get("https://www.amazon.com/gp/flex/sign-out.html")
             await page.sleep(3)
 
-            # Navigate to OAuth URL for device registration
+            # Set up interceptor BEFORE navigating to OAuth URL so we catch instant redirects
             _status("Please log into Amazon in the browser window...")
-            page = await browser.get(oauth_url)
-            await page.sleep(2)
             captured_codes = await _setup_auth_code_interceptor(page)
+            await page.get(oauth_url)
+            await page.sleep(2)
 
             auth_code = await _wait_for_oauth_redirect(page, captured_codes=captured_codes)
             if auth_code:
@@ -570,10 +596,11 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
     browser = await _start_browser(profile_dir, headless=True)
 
     try:
-        # Try OAuth flow first — navigate to OAuth URL
-        page = await browser.get(oauth_url)
-        await page.sleep(2)
+        # Set up interceptor BEFORE navigating to OAuth URL so we catch instant redirects
+        page = await browser.get("about:blank")
         captured_codes = await _setup_auth_code_interceptor(page)
+        await page.get(oauth_url)
+        await page.sleep(2)
 
         # Check if the OAuth redirected immediately (user already logged in)
         auth_code = captured_codes[0] if captured_codes else await _try_extract_auth_code(page)
@@ -626,10 +653,15 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         browser.stop()
         await asyncio.sleep(2)
         _status("Login needed — opening Amazon login window...")
+        # Generate fresh PKCE to avoid server-side state issues from the headless attempt
+        code_verifier, code_challenge, device_serial = _generate_pkce()
+        oauth_url = _build_oauth_url(code_challenge, device_serial)
         browser = await _start_browser(profile_dir, headless=False)
-        page = await browser.get(oauth_url)
-        await page.sleep(2)
+        # Set up interceptor BEFORE navigating so we catch instant redirects
+        page = await browser.get("about:blank")
         captured_codes = await _setup_auth_code_interceptor(page)
+        await page.get(oauth_url)
+        await page.sleep(2)
 
         _status("Waiting for Amazon login — please log in via the browser window...")
         auth_code = await _wait_for_oauth_redirect(page, captured_codes=captured_codes)

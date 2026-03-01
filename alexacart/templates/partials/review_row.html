@@ -9,21 +9,6 @@
         {% endif %}
     </td>
     <td class="product-cell">
-        {% if item.auto_committed %}
-        {# Auto-committed: read-only display, no form inputs #}
-        <div class="product-options">
-            <label class="product-option selected" style="cursor: default">
-                {% if item.image_url %}<img src="{{ item.image_url }}" alt="" class="option-thumb">{% endif %}
-                <span class="option-details">
-                    <strong>{{ item.product_name }}</strong>
-                    {% if item.brand %}<span class="brand">{{ item.brand }}</span>{% endif %}
-                    {% if item.price %}<span class="price">{{ item.price }}</span>{% endif %}
-                    {% if item.size %}<span class="size">{{ item.size }}</span>{% endif %}
-                    {% if item.product_url %}<a href="{{ item.product_url }}" target="_blank" class="product-link" onclick="event.stopPropagation()">view</a>{% endif %}
-                </span>
-            </label>
-        </div>
-        {% else %}
         <input type="hidden" name="items[{{ item.index }}][alexa_text]" value="{{ item.alexa_text }}">
         <input type="hidden" name="items[{{ item.index }}][product_name]" value="{{ item.product_name or '' }}" class="hidden-product-name">
         <input type="hidden" name="items[{{ item.index }}][product_url]" value="{{ item.product_url or '' }}" class="hidden-product-url">
@@ -38,9 +23,16 @@
                value="{{ item.extra_alexa_items | tojson if item.extra_alexa_items else '' }}">
 
         {% if item.alternatives %}
-        {# Multiple search results — radio for each #}
+        {# Alternatives list — preferences first, then search results #}
+        {% set has_both = item.alternatives | selectattr('source', 'equalto', 'preference') | list | length > 0 and item.alternatives | selectattr('source', 'equalto', 'search') | list | length > 0 %}
         <div class="product-options">
             {% for alt in item.alternatives %}
+            {% if has_both and loop.first and alt.source == 'preference' %}
+            <div class="alternatives-divider">Your preferences</div>
+            {% endif %}
+            {% if has_both and alt.source == 'search' and (loop.first or item.alternatives[loop.index0 - 1].source == 'preference') %}
+            <div class="alternatives-divider">Search results</div>
+            {% endif %}
             <label class="product-option {% if loop.first %}selected{% endif %}">
                 <input
                     type="radio"
@@ -140,15 +132,10 @@
                 <div id="custom-result-{{ item.index }}"></div>
             </details>
         </div>
-        {% endif %}
     </td>
     <td class="status">
         <div id="status-{{ item.index }}">
-            {% if item.auto_committed %}
-            <span class="badge badge-matched">&#10003; Added</span>
-            {% else %}
             <span class="badge badge-{{ item.status_class }}" data-original-status="{{ item.status }}" data-original-class="badge-{{ item.status_class }}">{{ item.status }}</span>
-            {% endif %}
         </div>
     </td>
 </tr>

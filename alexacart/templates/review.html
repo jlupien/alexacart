@@ -26,23 +26,7 @@
     </table>
 
     <div class="commit-section" id="commit-section">
-        {% set auto_count = proposals | selectattr('auto_committed') | list | length %}
-        {% if auto_count == proposals | length %}
-        <div class="status-message status-success">
-            All {{ auto_count }} items were auto-added to cart during search!
-        </div>
-        <div style="display: flex; gap: 0.75rem;">
-            <a href="https://www.instacart.com/store/{{ instacart_store | lower }}/storefront" target="_blank" class="btn btn-primary btn-lg">Review Cart on Instacart</a>
-            <a href="/order/" class="btn btn-outline btn-lg">Start New Order</a>
-        </div>
-        {% elif auto_count > 0 %}
-        <div style="margin-bottom: 0.75rem">
-            <p class="muted">{{ auto_count }} item(s) already added during search.</p>
-        </div>
-        <button type="submit" id="commit-btn" class="btn btn-primary btn-lg">Add Remaining to Cart</button>
-        {% else %}
         <button type="submit" id="commit-btn" class="btn btn-primary btn-lg">Add All to Cart</button>
-        {% endif %}
     </div>
 </form>
 {% endblock %}

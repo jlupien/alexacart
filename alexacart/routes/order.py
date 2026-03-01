@@ -52,6 +52,7 @@ class ProductOption:
     in_stock: bool = True
     item_id: str | None = None
     size: str | None = None
+    source: str | None = None  # "preference" or "search"
 
 
 @dataclass
@@ -75,7 +76,6 @@ class ProposalItem:
     in_stock: bool = True
     alternatives: list[ProductOption] = field(default_factory=list)
     extra_alexa_items: list[dict] = field(default_factory=list)
-    auto_committed: bool = False  # True if added to cart during search (rank 1 match)
     _raw_alexa_item: dict = field(default_factory=dict, repr=False)  # Raw API dict for mark_complete
 
 
@@ -96,7 +96,6 @@ class OrderSession:
     instacart_client: object | None = None
     # Detailed status text shown during logging_in phase
     status_detail: str = ""
-    auto_committed_count: int = 0
 
 
 @router.get("/")
@@ -266,7 +265,7 @@ async def _run_order(session: OrderSession):
             session.total_items = len(session.proposals)
 
             # Step 4: Search Instacart for each item
-            await _search_items(session, client, alexa_client)
+            await _search_items(session, client)
         finally:
             await alexa_client.close()
 
@@ -284,8 +283,9 @@ async def _apply_search_results(
 ):
     """Search Instacart and apply the best result to a proposal."""
     results = await client.search_products(query)
-    if results:
-        best = results[0]
+    in_stock = [r for r in results if r.in_stock] if results else []
+    if in_stock:
+        best = in_stock[0]
         proposal.product_name = best.product_name
         proposal.product_url = best.product_url
         proposal.brand = best.brand
@@ -295,7 +295,7 @@ async def _apply_search_results(
         proposal.size = best.size
         proposal.status = status
         proposal.status_class = status_class
-        proposal.in_stock = best.in_stock
+        proposal.in_stock = True
         proposal.alternatives = [
             ProductOption(
                 product_name=r.product_name,
@@ -306,8 +306,9 @@ async def _apply_search_results(
                 in_stock=r.in_stock,
                 item_id=r.item_id,
                 size=r.size,
+                source="search",
             )
-            for r in results
+            for r in in_stock
         ]
     else:
         proposal.status = "No results"
@@ -350,9 +351,14 @@ async def _auto_checkoff_alexa(alexa_client, proposal: ProposalItem):
 
 
 async def _search_single_item(
-    session: OrderSession, proposal: ProposalItem, client, alexa_client,
+    session: OrderSession, proposal: ProposalItem, client,
 ):
-    """Search Instacart for a single item using the API client."""
+    """Search Instacart for a single item using the API client.
+
+    For known items with preferences: fetches all preference details AND search
+    results in parallel, then combines them (preferences first, de-duped search after).
+    For unknown items: just runs a search.
+    """
     db = SessionLocal()
 
     session.active_searches.add(proposal.alexa_text)
@@ -362,90 +368,103 @@ async def _search_single_item(
         proposal.grocery_item_name = match.grocery_item_name
 
         if match.is_known and match.preferred_products:
-            # Try preferred products in rank order
-            found = False
-            for pref in match.preferred_products:
-                if pref.product_url:
-                    result = await client.get_product_details(pref.product_url)
-                else:
-                    results = await client.search_products(pref.product_name, limit=1)
-                    result = results[0] if results else None
-                if result and result.in_stock:
-                    proposal.product_name = result.product_name
-                    proposal.product_url = result.product_url or pref.product_url
-                    proposal.brand = result.brand or pref.brand
-                    proposal.price = result.price
-                    proposal.image_url = result.image_url or pref.image_url
-                    proposal.item_id = result.item_id
-                    proposal.size = result.size or pref.size
-                    proposal.in_stock = True
-                    found = True
-
-                    pref.last_seen_in_stock = datetime.now(UTC)
-                    db.commit()
-
-                    # Auto-commit rank-1 matches immediately
-                    if pref.rank == 1 and result.item_id:
-                        try:
-                            added = await client.add_to_cart(result.item_id)
-                        except Exception as add_err:
-                            logger.warning(
-                                "Auto-commit add_to_cart failed for '%s': %s",
-                                proposal.alexa_text, add_err,
-                            )
-                            added = False
-
-                        if added:
-                            proposal.auto_committed = True
-                            proposal.status = "Auto-added (choice #1)"
-                            proposal.status_class = "matched"
-                            session.auto_committed_count += 1
-
-                            try:
-                                await _auto_checkoff_alexa(alexa_client, proposal)
-                            except Exception as chk_err:
-                                logger.warning(
-                                    "Auto-commit Alexa check-off failed for '%s': %s",
-                                    proposal.alexa_text, chk_err,
-                                )
-
-                            _learn_from_result(
-                                db,
-                                alexa_text=proposal.alexa_text,
-                                grocery_item_id=proposal.grocery_item_id,
-                                final_product=proposal.product_name,
-                                product_url=proposal.product_url,
-                                brand=proposal.brand,
-                                image_url=proposal.image_url,
-                                size=proposal.size,
-                                was_corrected=False,
-                            )
-
-                            log_entry = OrderLog(
-                                session_id=session.session_id,
-                                alexa_text=proposal.alexa_text,
-                                matched_grocery_item_id=proposal.grocery_item_id,
-                                proposed_product=proposal.product_name,
-                                final_product=proposal.product_name,
-                                was_corrected=False,
-                                added_to_cart=True,
-                            )
-                            db.add(log_entry)
-                            db.commit()
-                        else:
-                            proposal.status = f"Matched (choice #{pref.rank})"
-                            proposal.status_class = "matched"
+            # Fetch ALL preference details + search results in parallel
+            async def _fetch_pref(pref):
+                """Fetch current details for a single preferred product."""
+                try:
+                    if pref.product_url:
+                        result = await client.get_product_details(pref.product_url)
                     else:
-                        proposal.status = f"Matched (choice #{pref.rank})"
-                        proposal.status_class = "matched"
+                        results = await client.search_products(pref.product_name, limit=1)
+                        result = results[0] if results else None
+                    if result:
+                        if result.in_stock:
+                            pref.last_seen_in_stock = datetime.now(UTC)
+                        return ProductOption(
+                            product_name=result.product_name,
+                            product_url=result.product_url or pref.product_url,
+                            brand=result.brand or pref.brand,
+                            price=result.price,
+                            image_url=result.image_url or pref.image_url,
+                            in_stock=result.in_stock,
+                            item_id=result.item_id,
+                            size=result.size or pref.size,
+                            source="preference",
+                        )
+                except Exception as e:
+                    logger.warning("Failed to fetch pref '%s': %s", pref.product_name, e)
+                return None
 
-                    break
+            # Launch all fetches in parallel: each preference + one search
+            pref_tasks = [_fetch_pref(pref) for pref in match.preferred_products]
+            all_results = await asyncio.gather(
+                *pref_tasks,
+                client.search_products(proposal.alexa_text),
+                return_exceptions=True,
+            )
 
-            if not found:
-                await _apply_search_results(
-                    proposal, client, proposal.alexa_text,
-                    "Substituted (usual out of stock)", "substituted",
-                )
+            # Split results: preferences (first N) and search (last one)
+            pref_results = all_results[:-1]
+            search_results_raw = all_results[-1]
+
+            db.commit()  # persist any last_seen_in_stock updates
+
+            # Build preference options (in-stock only, preserve rank order, skip None/errors)
+            pref_options = []
+            pref_ids = set()  # for de-duping search results
+            for r in pref_results:
+                if isinstance(r, Exception) or r is None:
+                    continue
+                pref_ids.add(r.item_id)
+                if r.product_url:
+                    pref_ids.add(r.product_url)
+                if r.in_stock:
+                    pref_options.append(r)
+
+            # Build search options, de-duped against preferences, in-stock only
+            search_options = []
+            if isinstance(search_results_raw, list):
+                for r in search_results_raw:
+                    if not r.in_stock:
+                        continue
+                    if r.item_id in pref_ids or (r.product_url and r.product_url in pref_ids):
+                        continue
+                    search_options.append(ProductOption(
+                        product_name=r.product_name,
+                        product_url=r.product_url,
+                        brand=r.brand,
+                        price=r.price,
+                        image_url=r.image_url,
+                        in_stock=r.in_stock,
+                        item_id=r.item_id,
+                        size=r.size,
+                        source="search",
+                    ))
+
+            # Combine: in-stock preferences → in-stock search results
+            all_options = pref_options + search_options
+
+            if all_options:
+                best = all_options[0]
+                proposal.product_name = best.product_name
+                proposal.product_url = best.product_url
+                proposal.brand = best.brand
+                proposal.price = best.price
+                proposal.image_url = best.image_url
+                proposal.item_id = best.item_id
+                proposal.size = best.size
+                proposal.in_stock = best.in_stock
+                proposal.alternatives = all_options
+
+                if pref_options:
+                    proposal.status = "Matched"
+                    proposal.status_class = "matched"
+                else:
+                    proposal.status = "Substituted"
+                    proposal.status_class = "substituted"
+            else:
+                proposal.status = "No results"
+                proposal.status_class = "error"
         else:
             await _apply_search_results(
                 proposal, client, proposal.alexa_text, "New item", "new",
@@ -461,7 +480,7 @@ async def _search_single_item(
         db.close()
 
 
-async def _search_items(session: OrderSession, client, alexa_client):
+async def _search_items(session: OrderSession, client):
     """Search Instacart for each item in the session — in parallel via API."""
     session.status = "searching"
 
@@ -471,7 +490,7 @@ async def _search_items(session: OrderSession, client, alexa_client):
         # Launch all searches concurrently — API handles parallelism
         results = await asyncio.gather(
             *[
-                _search_single_item(session, proposal, client, alexa_client)
+                _search_single_item(session, proposal, client)
                 for proposal in session.proposals
             ],
             return_exceptions=True,
@@ -556,12 +575,6 @@ async def progress_stream(session_id: str):
                 f"Searched {session.searched_count} of {session.total_items} items ({pct}%)"
                 f"</p>"
             )
-            if session.auto_committed_count > 0:
-                html += (
-                    f'<p class="progress-text">'
-                    f"&#10003; {session.auto_committed_count} item(s) auto-added to cart"
-                    f"</p>"
-                )
             if active:
                 items_str = ", ".join(html_escape(a) for a in active)
                 html += f'<p class="progress-text">Searching: {items_str}...</p>'
@@ -973,18 +986,13 @@ async def commit_progress_stream(session_id: str):
 
             if event_type == "complete":
                 _, added_count, skipped_count, failed_count, total_count = event
-                auto_count = session.auto_committed_count
-                total_added = added_count + auto_count
-                total_all = total_count + auto_count
                 store_slug = settings.instacart_store.lower()
                 summary = (
                     f'<div class="results-summary card">'
                     f"<h3>Order Complete</h3>"
                     f'<p class="muted" style="margin-bottom:1rem">'
-                    f"{total_added} of {total_all} items added to cart"
+                    f"{added_count} of {total_count} items added to cart"
                 )
-                if auto_count:
-                    summary += f" ({auto_count} auto-added)"
                 if skipped_count:
                     summary += f", {skipped_count} skipped"
                 if failed_count:

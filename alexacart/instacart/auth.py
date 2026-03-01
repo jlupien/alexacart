@@ -319,35 +319,14 @@ async def _discover_cart_id_from_browser(
     The browser has the correct household/session context, so any cart
     created here will be a household/family cart — not an orphan personal cart.
 
-    Strategy:
-    1. Try PersonalActiveCarts — returns existing carts (only non-empty ones)
-    2. Try ActiveCartId — allocates/discovers the correct cart for this store
+    Strategy (matches real browser behavior):
+    1. Extract addressId, then try ActiveCartId — returns the correct cart
+       tied to the user's delivery address (same as instacart.com uses)
+    2. Fall back to PersonalActiveCarts if ActiveCartId fails
     3. If no matching cart, add+remove a temporary item to force cart creation,
        then extract the cart ID from the mutation response
     """
-    # Strategy 1: PersonalActiveCarts
-    js = _JS_DISCOVER_CART_ID.replace("%STORE_SLUG%", store_slug)
-    raw = await _run_js(page, js, await_promise=True)
-    if raw:
-        try:
-            result = json.loads(raw)
-            if result.get("error"):
-                logger.warning("Browser PersonalActiveCarts error: %s", result["error"])
-            else:
-                household = result.get("household_id")
-                cart_type = "family" if household else "personal"
-                logger.info(
-                    "Browser PersonalActiveCarts: cart_id=%s (%s), household=%s, total_carts=%s",
-                    result.get("cart_id"), cart_type, household, result.get("all_carts"),
-                )
-                if result.get("cart_id"):
-                    return result["cart_id"]
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning("Browser PersonalActiveCarts parse error: %s (raw=%s)", e, raw[:200])
-    else:
-        logger.warning("Browser PersonalActiveCarts returned no result")
-
-    # Strategy 2: ActiveCartId (needs addressId)
+    # Strategy 1: ActiveCartId (needs addressId) — preferred, matches browser
     address_id = await _run_js(page, _JS_EXTRACT_ADDRESS_ID)
     if address_id:
         logger.info("Found addressId from page: %s", address_id)
@@ -370,6 +349,28 @@ async def _discover_cart_id_from_browser(
                 logger.warning("Browser ActiveCartId parse error: %s", e)
     else:
         logger.info("No addressId found on page — skipping ActiveCartId")
+
+    # Strategy 2: PersonalActiveCarts (fallback)
+    js = _JS_DISCOVER_CART_ID.replace("%STORE_SLUG%", store_slug)
+    raw = await _run_js(page, js, await_promise=True)
+    if raw:
+        try:
+            result = json.loads(raw)
+            if result.get("error"):
+                logger.warning("Browser PersonalActiveCarts error: %s", result["error"])
+            else:
+                household = result.get("household_id")
+                cart_type = "family" if household else "personal"
+                logger.info(
+                    "Browser PersonalActiveCarts: cart_id=%s (%s), household=%s, total_carts=%s",
+                    result.get("cart_id"), cart_type, household, result.get("all_carts"),
+                )
+                if result.get("cart_id"):
+                    return result["cart_id"]
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning("Browser PersonalActiveCarts parse error: %s (raw=%s)", e, raw[:200])
+    else:
+        logger.warning("Browser PersonalActiveCarts returned no result")
 
     # Strategy 3: Create cart by adding+removing a temporary item
     logger.info("No existing cart for %s, creating via browser context...", store_slug)

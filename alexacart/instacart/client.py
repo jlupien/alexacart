@@ -349,10 +349,33 @@ class InstacartClient:
     async def _validate_cart_id(self):
         """Check that the stored cart_id still exists.
 
-        Tries PersonalActiveCarts first, then ActiveCartId as fallback.
-        Family carts discovered by the browser may not appear in
-        PersonalActiveCarts when queried via httpx.
+        Tries ActiveCartId first when address_id is available (matching the
+        discovery order), then falls back to PersonalActiveCarts.
         """
+        # Strategy 1: ActiveCartId — preferred, matches browser behavior
+        if self._address_id and self._shop_id:
+            try:
+                data = await self._graphql_get("ActiveCartId", {
+                    "addressId": self._address_id,
+                    "shopId": self._shop_id,
+                })
+                basket = data.get("data", {}).get("shopBasket", {})
+                active_cart_id = basket.get("cartId")
+                if active_cart_id == self._cart_id:
+                    logger.info("Validated cart %s via ActiveCartId", self._cart_id)
+                    return
+                if active_cart_id:
+                    # ActiveCartId returned a different cart — use it instead
+                    logger.info(
+                        "ActiveCartId returned cart %s (stored was %s) — updating",
+                        active_cart_id, self._cart_id,
+                    )
+                    self._cart_id = active_cart_id
+                    return
+            except Exception as e:
+                logger.warning("ActiveCartId validation failed: %s", e)
+
+        # Strategy 2: PersonalActiveCarts fallback
         try:
             carts = await self.get_active_carts()
             for cart in carts:
@@ -366,22 +389,6 @@ class InstacartClient:
                     return
         except Exception as e:
             logger.warning("PersonalActiveCarts validation failed: %s", e)
-
-        # Cart not in PersonalActiveCarts — try ActiveCartId as fallback.
-        # Family carts discovered by the browser may not appear in
-        # PersonalActiveCarts via httpx, but ActiveCartId can confirm them.
-        if self._address_id and self._shop_id:
-            try:
-                data = await self._graphql_get("ActiveCartId", {
-                    "addressId": self._address_id,
-                    "shopId": self._shop_id,
-                })
-                basket = data.get("data", {}).get("shopBasket", {})
-                if basket.get("cartId") == self._cart_id:
-                    logger.info("Validated cart %s via ActiveCartId", self._cart_id)
-                    return
-            except Exception as e:
-                logger.warning("ActiveCartId validation failed: %s", e)
 
         logger.info("Stored cart %s not found in active carts — clearing", self._cart_id)
         self._cart_id = ""

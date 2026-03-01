@@ -345,28 +345,22 @@ class InstacartClient:
         return items, item_ids
 
     async def _validate_cart_id(self):
-        """Check that the stored cart_id is a family cart (has householdId).
+        """Check that the stored cart_id still exists in active carts.
 
-        If PersonalActiveCarts doesn't return it or it has no householdId,
-        clear it so _discover_cart_id can find a proper family cart.
+        If PersonalActiveCarts doesn't return it, clear it so
+        _discover_cart_id can find a valid cart.
         """
         try:
             carts = await self.get_active_carts()
             for cart in carts:
                 if cart.get("id") == self._cart_id:
-                    if cart.get("householdId"):
-                        logger.info(
-                            "Validated cart %s is a family cart (household=%s)",
-                            self._cart_id, cart["householdId"],
-                        )
-                        return
-                    else:
-                        logger.warning(
-                            "Stored cart %s is a personal cart (no householdId) — clearing",
-                            self._cart_id,
-                        )
-                        self._cart_id = ""
-                        return
+                    household = cart.get("householdId")
+                    cart_type = "family" if household else "personal"
+                    logger.info(
+                        "Validated cart %s (%s cart, household=%s)",
+                        self._cart_id, cart_type, household,
+                    )
+                    return
             # Cart not found in active carts (may have been emptied/deleted)
             logger.info("Stored cart %s not found in active carts — clearing", self._cart_id)
             self._cart_id = ""
@@ -384,21 +378,22 @@ class InstacartClient:
                     for c in carts
                 ],
             )
+            # Prefer family carts (with householdId), fall back to personal
+            fallback_cart_id = None
             for cart in carts:
                 slug = cart.get("retailer", {}).get("slug", "").lower()
                 if slug == self._retailer_slug:
-                    # Prefer family/household carts — skip personal carts
-                    # (carts without householdId) since those are invisible
-                    # to other household members on the Instacart website.
-                    if not cart.get("householdId"):
-                        logger.info(
-                            "Skipping personal cart %s (no householdId)", cart["id"],
-                        )
-                        continue
-                    self._cart_id = cart["id"]
-                    logger.info("Discovered cart ID: %s for %s", self._cart_id, self._retailer_slug)
-                    return
-            logger.warning("No active family cart found for %s", self._retailer_slug)
+                    if cart.get("householdId"):
+                        self._cart_id = cart["id"]
+                        logger.info("Discovered family cart ID: %s for %s", self._cart_id, self._retailer_slug)
+                        return
+                    elif not fallback_cart_id:
+                        fallback_cart_id = cart["id"]
+            if fallback_cart_id:
+                self._cart_id = fallback_cart_id
+                logger.info("Discovered personal cart ID: %s for %s (no family cart available)", self._cart_id, self._retailer_slug)
+                return
+            logger.warning("No active cart found for %s", self._retailer_slug)
         except Exception as e:
             logger.warning("Failed to discover cart ID: %s", e)
 

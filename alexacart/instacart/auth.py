@@ -126,15 +126,20 @@ _JS_DISCOVER_CART_ID = """
         var data = await resp.json();
         var carts = (data.data || {}).userCarts || {};
         var cartList = carts.carts || [];
+        var fallback = null;
         for (var i = 0; i < cartList.length; i++) {
             var cart = cartList[i];
             var retailer = cart.retailer || {};
             if ((retailer.slug || '').toLowerCase() === slug) {
-                // Only return family/household carts — personal carts (no householdId)
-                // are invisible to other household members on instacart.com
-                if (!cart.householdId) continue;
-                return JSON.stringify({cart_id: cart.id, household_id: cart.householdId, all_carts: cartList.length});
+                // Prefer family/household carts, fall back to personal
+                if (cart.householdId) {
+                    return JSON.stringify({cart_id: cart.id, household_id: cart.householdId, all_carts: cartList.length});
+                }
+                if (!fallback) fallback = cart;
             }
+        }
+        if (fallback) {
+            return JSON.stringify({cart_id: fallback.id, household_id: null, all_carts: cartList.length});
         }
         return JSON.stringify({cart_id: null, all_carts: cartList.length});
     } catch(e) {

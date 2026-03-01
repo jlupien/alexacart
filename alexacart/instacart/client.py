@@ -437,7 +437,12 @@ class InstacartClient:
         image_url = item_image.get("url", "")
 
         evergreen_url = item.get("evergreenUrl", "")
-        product_url = f"https://www.instacart.com/products/{evergreen_url}" if evergreen_url else None
+        product_url = None
+        if evergreen_url:
+            if self._retailer_slug:
+                product_url = f"https://www.instacart.com/store/{self._retailer_slug}/product_page/{evergreen_url}"
+            else:
+                product_url = f"https://www.instacart.com/products/{evergreen_url}"
 
         return ProductResult(
             product_name=name,

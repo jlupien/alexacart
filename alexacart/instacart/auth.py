@@ -644,13 +644,9 @@ async def extract_session_via_nodriver(on_status=None) -> dict:
 async def ensure_valid_session() -> dict:
     """Load cached session or extract a new one via nodriver."""
     data = load_instacart_cookies()
-    if data and data.get("cookies") and data.get("cart_id"):
-        params = data.get("session_params", {})
-        if params.get("address_id"):
+    if data and data.get("cookies"):
+        if data.get("cart_id"):
             return data
-        # Without address_id we can't validate/discover the correct cart
-        # via ActiveCartId — re-extract to get it.
-        logger.info("Cached session missing address_id — re-extracting via nodriver")
-    elif data and data.get("cookies"):
+        # Cookies exist but no cart_id — re-run nodriver to discover it
         logger.info("Cached Instacart session has no cart_id — re-extracting via nodriver")
     return await extract_session_via_nodriver()

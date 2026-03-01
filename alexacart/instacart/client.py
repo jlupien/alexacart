@@ -101,9 +101,12 @@ class InstacartClient:
     async def init_session(self):
         """Discover cart ID and validate session.
 
-        If a cart_id was loaded from saved data, validate it's a family cart
-        (has householdId). Stale personal carts are invisible on instacart.com.
+        If address_id or session params are missing (old cached session or
+        failed nodriver extraction), discover them via httpx by fetching the
+        store page HTML.
         """
+        if not self._address_id or not self._shop_id:
+            await self._discover_session_context()
         if self._cart_id:
             await self._validate_cart_id()
         if not self._cart_id:
@@ -352,6 +355,53 @@ class InstacartClient:
         item_ids = content.get("itemIds") or []
 
         return items, item_ids
+
+    async def _discover_session_context(self):
+        """Discover address_id and missing session params by fetching the store page.
+
+        Parses __NEXT_DATA__ and inline scripts from the server-rendered HTML.
+        This avoids requiring nodriver re-extraction — one httpx GET fills in
+        both address_id (for ActiveCartId) and session params (for searches).
+        """
+        if not self._retailer_slug:
+            return
+        url = f"https://www.instacart.com/store/{self._retailer_slug}"
+        try:
+            resp = await self._client.get(url, follow_redirects=True)
+            if resp.status_code != 200:
+                logger.debug("Store page returned %d for session context discovery", resp.status_code)
+                return
+            html = resp.text
+
+            # Discover address_id
+            if not self._address_id:
+                m = re.search(r'"addressId"\s*:\s*"(\d+)"', html)
+                if not m:
+                    m = re.search(r'"address_id"\s*:\s*"?(\d+)"?', html)
+                if m:
+                    self._address_id = m.group(1)
+                    logger.info("Discovered address_id via httpx: %s", self._address_id)
+
+            # Discover missing session params from page HTML
+            # Maps (attribute_name, regex_pattern) — attribute names match self._*
+            param_patterns = [
+                ("_shop_id", r'"shopId"\s*:\s*"(\d+)"'),
+                ("_zone_id", r'"zoneId"\s*:\s*"(\d+)"'),
+                ("_postal_code", r'"postalCode"\s*:\s*"(\d{5})"'),
+                ("_inventory_token", r'"retailerInventorySessionToken"\s*:\s*"([^"]+)"'),
+                ("_location_id", r'items_(\d+)-\d+'),
+            ]
+            discovered = []
+            for attr, pattern in param_patterns:
+                if not getattr(self, attr, ""):
+                    m = re.search(pattern, html)
+                    if m:
+                        setattr(self, attr, m.group(1))
+                        discovered.append(attr)
+            if discovered:
+                logger.info("Discovered session params via httpx: %s", discovered)
+        except Exception as e:
+            logger.debug("Session context discovery via httpx failed: %s", e)
 
     async def _validate_cart_id(self):
         """Check that the stored cart_id still exists.

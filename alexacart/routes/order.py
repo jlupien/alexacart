@@ -823,7 +823,8 @@ async def _commit_single_item(
                 break
 
         product_url = data.get("product_url", "")
-        added = await client.add_to_cart(item_id)
+        quantity = int(data.get("quantity") or 1)
+        added = await client.add_to_cart(item_id, quantity=quantity)
         checked_off = True
 
         if added and proposal:

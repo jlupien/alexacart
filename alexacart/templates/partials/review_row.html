@@ -133,6 +133,9 @@
             </details>
         </div>
     </td>
+    <td class="qty-cell">
+        <input type="number" name="items[{{ item.index }}][quantity]" value="1" min="1" max="99" class="qty-input">
+    </td>
     <td class="status">
         <div id="status-{{ item.index }}">
             <span class="badge badge-{{ item.status_class }}" data-original-status="{{ item.status }}" data-original-class="badge-{{ item.status_class }}">{{ item.status }}</span>

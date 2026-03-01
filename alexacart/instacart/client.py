@@ -250,6 +250,9 @@ class InstacartClient:
             if fetched:
                 price = fetched[0].price
                 in_stock = fetched[0].in_stock
+                # Prefer Items image — LandingProductMeta often returns a placeholder
+                if fetched[0].image_url:
+                    image_url = fetched[0].image_url
 
         return ProductResult(
             product_name=name,

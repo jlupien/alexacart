@@ -13,6 +13,7 @@ Performance API.
 import asyncio
 import json
 import logging
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -471,6 +472,41 @@ async def _extract_session_params(page, store_slug: str) -> dict:
     return params
 
 
+def _cleanup_stale_chrome(profile_dir: Path) -> None:
+    """Kill orphaned Chrome processes using this profile and remove lock files.
+
+    When nodriver fails to connect after spawning Chrome, the process stays
+    alive and holds the profile lock, blocking all future launches.
+    """
+    import signal
+    import subprocess
+
+    # Kill Chrome processes referencing this profile directory
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", str(profile_dir)],
+            capture_output=True, text=True, timeout=5,
+        )
+        for pid_str in result.stdout.strip().split("\n"):
+            if pid_str.strip():
+                try:
+                    pid = int(pid_str.strip())
+                    os.kill(pid, signal.SIGTERM)
+                    logger.info("Killed orphaned Chrome process %d for %s", pid, profile_dir.name)
+                except (ValueError, ProcessLookupError, PermissionError):
+                    pass
+    except Exception as e:
+        logger.debug("Chrome cleanup pgrep failed: %s", e)
+
+    # Remove stale lock files so a new Chrome instance can start
+    for lock_file in profile_dir.glob("Singleton*"):
+        try:
+            lock_file.unlink()
+            logger.info("Removed stale lock file: %s", lock_file.name)
+        except OSError:
+            pass
+
+
 async def extract_session_via_nodriver(on_status=None) -> dict:
     """
     Login to Instacart via nodriver and extract session cookies + params.
@@ -505,6 +541,7 @@ async def extract_session_via_nodriver(on_status=None) -> dict:
     search_url = f"{INSTACART_BASE}/store/{store_slug}/s?k=milk"
 
     _status("Checking Instacart login...")
+    _cleanup_stale_chrome(profile_dir)
     for attempt in range(3):
         try:
             browser = await uc.start(user_data_dir=str(profile_dir), headless=True)
@@ -512,6 +549,7 @@ async def extract_session_via_nodriver(on_status=None) -> dict:
         except Exception as e:
             if attempt < 2:
                 logger.warning("nodriver headless start attempt %d failed: %s", attempt + 1, e)
+                _cleanup_stale_chrome(profile_dir)
                 await asyncio.sleep(2)
             else:
                 raise

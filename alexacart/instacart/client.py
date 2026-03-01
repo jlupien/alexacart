@@ -32,6 +32,7 @@ _APQ = {
     "Items": "5116339819ff07f207fd38f949a8a7f58e52cc62223b535405b087e3076ebf2f",
     "UpdateCartItemsMutation": "7c2c63093a07a61b056c09be23eba6f5790059dca8179f7af7580c0456b1049f",
     "PersonalActiveCarts": "eac9d17bd45b099fbbdabca2e111acaf2a4fa486f2ce5bc4e8acbab2f31fd8c0",
+    "ActiveCartId": "6803f97683d706ab6faa3c658a0d6766299dbe1ff55f78b720ca2ef77de7c5c7",
     "LandingProductMeta": "0adb678fd5eae17020624e19c376b2e2eb18235b3d6c164ed458952cc2f8260c",
     "ItemPricesQuery": "b1f35040f89d7ebfeea056e00f759a430a09621545a855835c001fc0ed9ab4f7",
 }
@@ -82,6 +83,7 @@ class InstacartClient:
         self._location_id = params.get("retailer_location_id", "")
         self._inventory_token = params.get("retailer_inventory_session_token", "")
         self._retailer_slug = params.get("retailer_slug", settings.instacart_store.lower())
+        self._address_id = params.get("address_id", "")
         self._cart_id = session_data.get("cart_id", "")
         self._cart_lock = asyncio.Lock()
 
@@ -345,10 +347,11 @@ class InstacartClient:
         return items, item_ids
 
     async def _validate_cart_id(self):
-        """Check that the stored cart_id still exists in active carts.
+        """Check that the stored cart_id still exists.
 
-        If PersonalActiveCarts doesn't return it, clear it so
-        _discover_cart_id can find a valid cart.
+        Tries PersonalActiveCarts first, then ActiveCartId as fallback.
+        Family carts discovered by the browser may not appear in
+        PersonalActiveCarts when queried via httpx.
         """
         try:
             carts = await self.get_active_carts()
@@ -361,13 +364,49 @@ class InstacartClient:
                         self._cart_id, cart_type, household,
                     )
                     return
-            # Cart not found in active carts (may have been emptied/deleted)
-            logger.info("Stored cart %s not found in active carts — clearing", self._cart_id)
-            self._cart_id = ""
         except Exception as e:
-            logger.warning("Failed to validate cart ID: %s", e)
+            logger.warning("PersonalActiveCarts validation failed: %s", e)
+
+        # Cart not in PersonalActiveCarts — try ActiveCartId as fallback.
+        # Family carts discovered by the browser may not appear in
+        # PersonalActiveCarts via httpx, but ActiveCartId can confirm them.
+        if self._address_id and self._shop_id:
+            try:
+                data = await self._graphql_get("ActiveCartId", {
+                    "addressId": self._address_id,
+                    "shopId": self._shop_id,
+                })
+                basket = data.get("data", {}).get("shopBasket", {})
+                if basket.get("cartId") == self._cart_id:
+                    logger.info("Validated cart %s via ActiveCartId", self._cart_id)
+                    return
+            except Exception as e:
+                logger.warning("ActiveCartId validation failed: %s", e)
+
+        logger.info("Stored cart %s not found in active carts — clearing", self._cart_id)
+        self._cart_id = ""
 
     async def _discover_cart_id(self):
+        # Strategy 1: ActiveCartId — most reliable, auto-allocates the correct
+        # cart (family if in household) for a given address + shop.
+        if self._address_id and self._shop_id:
+            try:
+                data = await self._graphql_get("ActiveCartId", {
+                    "addressId": self._address_id,
+                    "shopId": self._shop_id,
+                })
+                basket = data.get("data", {}).get("shopBasket", {})
+                cart_id = basket.get("cartId")
+                if cart_id:
+                    self._cart_id = cart_id
+                    logger.info("ActiveCartId: cart_id=%s for shop=%s, address=%s",
+                                cart_id, self._shop_id, self._address_id)
+                    return
+                logger.info("ActiveCartId returned no cartId")
+            except Exception as e:
+                logger.warning("ActiveCartId failed: %s", e)
+
+        # Strategy 2: PersonalActiveCarts — lists all active carts
         try:
             carts = await self.get_active_carts()
             logger.info(

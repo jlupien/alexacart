@@ -111,6 +111,64 @@ _JS_EXTRACT_FROM_PAGE = """
 """
 
 
+# Extract addressId from page data (for ActiveCartId fallback).
+# Looks in Performance API entries and __NEXT_DATA__.
+_JS_EXTRACT_ADDRESS_ID = """
+(function() {
+    var entries = performance.getEntriesByType('resource');
+    for (var i = 0; i < entries.length; i++) {
+        var name = entries[i].name;
+        if (name.indexOf('ActiveCartId') >= 0) {
+            try {
+                var url = new URL(name);
+                var vars = JSON.parse(decodeURIComponent(url.searchParams.get('variables')));
+                if (vars.addressId) return vars.addressId;
+            } catch(e) {}
+        }
+    }
+    var sources = [];
+    var nd = document.getElementById('__NEXT_DATA__');
+    if (nd) sources.push(nd.textContent);
+    var scripts = document.querySelectorAll('script');
+    for (var i = 0; i < scripts.length; i++) {
+        if (scripts[i].textContent.length > 100) sources.push(scripts[i].textContent);
+    }
+    var text = sources.join('\\n');
+    var m = text.match(/"addressId"\\s*:\\s*"(\\d+)"/);
+    if (m) return m[1];
+    m = text.match(/"address_id"\\s*:\\s*"?(\\d+)"?/);
+    if (m) return m[1];
+    return null;
+})()
+"""
+
+# Call ActiveCartId GraphQL query from browser context.
+# This allocates/discovers the correct cart (family if in household) for
+# a given address + shop. More reliable than PersonalActiveCarts which
+# only returns non-empty carts.
+_JS_CALL_ACTIVE_CART_ID = """
+(async function() {
+    var addressId = "%ADDRESS_ID%";
+    var shopId = "%SHOP_ID%";
+    var hash = "6803f97683d706ab6faa3c658a0d6766299dbe1ff55f78b720ca2ef77de7c5c7";
+    try {
+        var resp = await fetch(
+            '/graphql?operationName=ActiveCartId'
+            + '&variables=' + encodeURIComponent(JSON.stringify({addressId: addressId, shopId: shopId}))
+            + '&extensions=' + encodeURIComponent(JSON.stringify({
+                persistedQuery: {version: 1, sha256Hash: hash}
+            })),
+            {headers: {"x-client-identifier": "web"}}
+        );
+        var data = await resp.json();
+        var basket = (data.data || {}).shopBasket || {};
+        return JSON.stringify({cart_id: basket.cartId || null, cart_type: basket.cartType || null});
+    } catch(e) {
+        return JSON.stringify({error: e.message});
+    }
+})()
+"""
+
 _JS_DISCOVER_CART_ID = """
 (async function() {
     var slug = "%STORE_SLUG%";
@@ -263,27 +321,57 @@ async def _discover_cart_id_from_browser(
 
     Strategy:
     1. Try PersonalActiveCarts — returns existing carts (only non-empty ones)
-    2. If no matching cart, add+remove a temporary item to force cart creation,
+    2. Try ActiveCartId — allocates/discovers the correct cart for this store
+    3. If no matching cart, add+remove a temporary item to force cart creation,
        then extract the cart ID from the mutation response
     """
+    # Strategy 1: PersonalActiveCarts
     js = _JS_DISCOVER_CART_ID.replace("%STORE_SLUG%", store_slug)
-    raw = await _run_js(page, js)
+    raw = await _run_js(page, js, await_promise=True)
     if raw:
         try:
             result = json.loads(raw)
             if result.get("error"):
-                logger.warning("Browser cart discovery error: %s", result["error"])
+                logger.warning("Browser PersonalActiveCarts error: %s", result["error"])
             else:
+                household = result.get("household_id")
+                cart_type = "family" if household else "personal"
                 logger.info(
-                    "Browser cart discovery: cart_id=%s, total_carts=%s",
-                    result.get("cart_id"), result.get("all_carts"),
+                    "Browser PersonalActiveCarts: cart_id=%s (%s), household=%s, total_carts=%s",
+                    result.get("cart_id"), cart_type, household, result.get("all_carts"),
                 )
                 if result.get("cart_id"):
                     return result["cart_id"]
-        except (json.JSONDecodeError, TypeError):
-            pass
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning("Browser PersonalActiveCarts parse error: %s (raw=%s)", e, raw[:200])
+    else:
+        logger.warning("Browser PersonalActiveCarts returned no result")
 
-    # No existing cart — create one by adding+removing a temporary item
+    # Strategy 2: ActiveCartId (needs addressId)
+    address_id = await _run_js(page, _JS_EXTRACT_ADDRESS_ID)
+    if address_id:
+        logger.info("Found addressId from page: %s", address_id)
+        session_params["address_id"] = address_id
+        active_js = (
+            _JS_CALL_ACTIVE_CART_ID
+            .replace("%ADDRESS_ID%", address_id)
+            .replace("%SHOP_ID%", session_params.get("shop_id", ""))
+        )
+        raw = await _run_js(page, active_js, await_promise=True)
+        if raw:
+            try:
+                result = json.loads(raw)
+                if result.get("error"):
+                    logger.warning("Browser ActiveCartId error: %s", result["error"])
+                elif result.get("cart_id"):
+                    logger.info("Browser ActiveCartId: cart_id=%s", result["cart_id"])
+                    return result["cart_id"]
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning("Browser ActiveCartId parse error: %s", e)
+    else:
+        logger.info("No addressId found on page — skipping ActiveCartId")
+
+    # Strategy 3: Create cart by adding+removing a temporary item
     logger.info("No existing cart for %s, creating via browser context...", store_slug)
     get_item_js = (
         _JS_GET_FIRST_ITEM_ID
@@ -292,14 +380,14 @@ async def _discover_cart_id_from_browser(
         .replace("%ZONE_ID%", session_params.get("zone_id", ""))
         .replace("%LOCATION_ID%", session_params.get("retailer_location_id", ""))
     )
-    item_id = await _run_js(page, get_item_js)
+    item_id = await _run_js(page, get_item_js, await_promise=True)
     if not item_id:
         logger.warning("Could not find an item_id to create cart")
         return None
 
     logger.info("Creating family cart with temporary item: %s", item_id)
     create_js = _JS_CREATE_CART.replace("%ITEM_ID%", item_id)
-    raw = await _run_js(page, create_js)
+    raw = await _run_js(page, create_js, await_promise=True)
     if not raw:
         logger.warning("Cart creation returned no result")
         return None
@@ -314,10 +402,15 @@ async def _discover_cart_id_from_browser(
         return None
 
 
-async def _run_js(page, js_code: str) -> str | None:
-    """Execute JavaScript on a nodriver page and return the string result."""
+async def _run_js(page, js_code: str, await_promise: bool = False) -> str | None:
+    """Execute JavaScript on a nodriver page and return the string result.
+
+    Set await_promise=True for async JS functions (those using fetch() or
+    other async operations). Without this, nodriver returns the unresolved
+    Promise object instead of the resolved value.
+    """
     try:
-        result = await page.evaluate(js_code)
+        result = await page.evaluate(js_code, await_promise=await_promise)
         if isinstance(result, str):
             return result
         if hasattr(result, "value"):

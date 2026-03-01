@@ -16,6 +16,7 @@ def init_db() -> None:
     settings.resolved_data_dir.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(engine)
     _migrate_order_log()
+    _migrate_preferred_products()
 
 
 def _migrate_order_log() -> None:
@@ -28,6 +29,18 @@ def _migrate_order_log() -> None:
         if "skipped" not in columns:
             logger.info("Migrating order_log: adding 'skipped' column")
             conn.execute(text("ALTER TABLE order_log ADD COLUMN skipped BOOLEAN DEFAULT 0"))
+
+
+def _migrate_preferred_products() -> None:
+    """Add columns introduced after initial schema."""
+    insp = inspect(engine)
+    if "preferred_products" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("preferred_products")}
+    with engine.begin() as conn:
+        if "size" not in columns:
+            logger.info("Migrating preferred_products: adding 'size' column")
+            conn.execute(text("ALTER TABLE preferred_products ADD COLUMN size TEXT"))
 
 
 def get_db() -> Session:

@@ -40,6 +40,7 @@
                 <span class="rank-badge">#{{ p.rank }}</span>
                 {% if p.image_url %}<img src="{{ p.image_url }}" alt="" class="product-thumb">{% endif %}
                 <span>{{ p.product_name }}</span>
+                {% if p.size %}<span class="size">{{ p.size }}</span>{% endif %}
                 {% if p.product_url %}<a href="{{ p.product_url }}" target="_blank" class="product-link" title="{{ p.product_url }}">link</a>{% endif %}
                 {% if p.brand %}<span class="brand">({{ p.brand }})</span>{% endif %}
                 <div class="rank-controls">

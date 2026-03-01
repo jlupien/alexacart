@@ -113,6 +113,7 @@ def add_preferred_product(
     brand: str | None = None,
     image_url: str | None = None,
     rank: int | None = None,
+    size: str | None = None,
 ) -> PreferredProduct:
     """
     Add a preferred product for a grocery item.
@@ -148,6 +149,8 @@ def add_preferred_product(
             existing.image_url = image_url
         if product_url:
             existing.product_url = product_url
+        if size:
+            existing.size = size
         db.flush()
         return existing
 
@@ -180,6 +183,7 @@ def add_preferred_product(
         product_url=product_url,
         brand=brand,
         image_url=image_url,
+        size=size,
     )
     db.add(product)
     db.flush()
@@ -216,7 +220,7 @@ def promote_product(db: Session, product_id: int) -> None:
         db.flush()
 
 
-def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str, product_url: str | None = None, brand: str | None = None, image_url: str | None = None) -> PreferredProduct:
+def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str, product_url: str | None = None, brand: str | None = None, image_url: str | None = None, size: str | None = None) -> PreferredProduct:
     """
     Make a product the #1 choice for a grocery item.
     If it already exists, move it to rank 1. Otherwise, add it at rank 1.
@@ -252,6 +256,8 @@ def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str
             existing.brand = brand
         if product_url:
             existing.product_url = product_url
+        if size:
+            existing.size = size
         if existing.rank == 1:
             db.flush()
             return existing
@@ -272,5 +278,5 @@ def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str
         return existing
     else:
         return add_preferred_product(
-            db, grocery_item_id, product_name, product_url=product_url, brand=brand, image_url=image_url, rank=1
+            db, grocery_item_id, product_name, product_url=product_url, brand=brand, image_url=image_url, rank=1, size=size
         )

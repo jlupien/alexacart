@@ -12,7 +12,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "httpx>=0.28.0",
     "pydantic-settings>=2.0.0",
-    "browser-use>=0.1.40",
+    "python-multipart>=0.0.18",
     "sse-starlette>=2.0.0",
     "nodriver>=0.48.1",
 ]

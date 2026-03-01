@@ -379,6 +379,11 @@ main {
     font-weight: 600;
 }
 
+.size {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
 .product-link {
     color: var(--primary);
     font-size: 0.75rem;

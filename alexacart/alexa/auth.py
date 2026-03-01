@@ -315,6 +315,7 @@ async def _wait_for_oauth_redirect(page, timeout_polls: int = 100) -> str | None
     Poll the browser page URL waiting for the OAuth redirect to maplanding.
     Returns the authorization_code if captured, or None on timeout.
     """
+    maplanding_polls = 0
     for _ in range(timeout_polls):  # Up to ~5 minutes
         await page.sleep(3)
         code = await _try_extract_auth_code(page)
@@ -323,7 +324,15 @@ async def _wait_for_oauth_redirect(page, timeout_polls: int = 100) -> str | None
             return code
         # Also check if user navigated away from the login flow
         url = page.url or ""
-        if "amazon.com" in url and "/ap/" not in url and "maplanding" not in url:
+        if "maplanding" in url:
+            # We're on the maplanding page but no auth code in the URL.
+            # Give it a couple polls in case the page is still loading/redirecting,
+            # then bail — the user sees a blank/404 page otherwise.
+            maplanding_polls += 1
+            if maplanding_polls >= 2:
+                logger.info("On maplanding page but no auth code captured — moving on")
+                return None
+        elif "amazon.com" in url and "/ap/" not in url:
             # User is on amazon.com but not in the auth flow — login succeeded
             # but we missed the redirect (e.g. 2FA or CAPTCHA changed the flow)
             logger.info("User appears logged in but OAuth redirect not captured")
@@ -484,8 +493,16 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
             await page.sleep(2)
             return await _extract_and_save_cookies(browser, _status)
 
-        # Check if we ended up on a login page or on amazon.com
+        # Check if we ended up on maplanding (user was already logged in,
+        # OAuth redirected but auth code wasn't in the URL)
         page_url = page.url or ""
+        if "maplanding" in page_url:
+            _status("Already logged into Amazon")
+            page = await browser.get("https://www.amazon.com")
+            await page.sleep(2)
+            return await _extract_and_save_cookies(browser, _status)
+
+        # Check if we ended up on a login page or on amazon.com
         logged_in = False
         if "amazon.com" in page_url and "/ap/" not in page_url:
             # We're on amazon.com, not a login page — check if logged in

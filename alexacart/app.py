@@ -16,15 +16,7 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 templates.env.globals["instacart_store"] = settings.instacart_store
 
 
-class _JudgeWarningFilter(logging.Filter):
-    """Suppress noisy 'Simple judge failed' warnings from browser-use."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        return "Simple judge failed" not in record.getMessage()
-
-
 def create_app() -> FastAPI:
-    logging.getLogger("Agent").addFilter(_JudgeWarningFilter())
 
     app = FastAPI(title="AlexaCart")
 

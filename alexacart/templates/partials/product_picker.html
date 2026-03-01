@@ -11,11 +11,12 @@
                 <strong>{{ product.product_name }}</strong>
                 {% if product.brand %}<span class="brand">{{ product.brand }}</span>{% endif %}
                 <span class="price">{{ product.price or "N/A" }}</span>
+                {% if product.size %}<span class="size">{{ product.size }}</span>{% endif %}
             </div>
             <button
                 type="button"
                 class="btn btn-sm btn-primary"
-                onclick="selectProduct({{ index }}, {{ product.product_name|tojson }}, {{ (product.price or '')|tojson }}, {{ (product.image_url or '')|tojson }}, {{ (product.product_url or '')|tojson }}, {{ (product.brand or '')|tojson }})"
+                onclick="selectProduct({{ index }}, {{ product.product_name|tojson }}, {{ (product.price or '')|tojson }}, {{ (product.image_url or '')|tojson }}, {{ (product.product_url or '')|tojson }}, {{ (product.brand or '')|tojson }}, {{ (product.item_id or '')|tojson }}, {{ (product.size or '')|tojson }})"
             >
                 Select
             </button>

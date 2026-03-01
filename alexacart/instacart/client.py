@@ -189,7 +189,7 @@ class InstacartClient:
         # Fetch remaining items by ID if we don't have enough inline
         if len(results) < limit and unfetched_ids:
             needed = limit - len(results)
-            fetched = await self._fetch_items_by_id(unfetched_ids[:needed])
+            fetched = await self.fetch_items_by_id(unfetched_ids[:needed])
             results.extend(fetched)
 
         # Discover location_id from results if we don't have it yet
@@ -246,7 +246,7 @@ class InstacartClient:
 
         if product_id and self._location_id:
             item_id = f"items_{self._location_id}-{product_id}"
-            fetched = await self._fetch_items_by_id([item_id])
+            fetched = await self.fetch_items_by_id([item_id])
             if fetched:
                 price = fetched[0].price
                 in_stock = fetched[0].in_stock
@@ -343,7 +343,7 @@ class InstacartClient:
         except Exception as e:
             logger.warning("Failed to discover cart ID: %s", e)
 
-    async def _fetch_items_by_id(self, item_ids: list[str]) -> list[ProductResult]:
+    async def fetch_items_by_id(self, item_ids: list[str]) -> list[ProductResult]:
         if not item_ids:
             return []
 

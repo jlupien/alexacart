@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse
@@ -48,6 +49,68 @@ async def preferences_page(request: Request, db: Session = Depends(get_db)):
     return templates.TemplateResponse(
         "preferences.html", {"request": request, "items": items}
     )
+
+
+@router.post("/backfill", response_class=HTMLResponse)
+async def backfill_product_data(request: Request, db: Session = Depends(get_db)):
+    """Refresh product data (size, image, brand, etc.) from Instacart for all preferred products."""
+    from alexacart.instacart.auth import ensure_valid_session
+    from alexacart.instacart.client import InstacartClient
+
+    products = (
+        db.query(PreferredProduct)
+        .filter(PreferredProduct.size.is_(None), PreferredProduct.product_url.isnot(None))
+        .all()
+    )
+
+    if not products:
+        return HTMLResponse(_render_all_items(request, db))
+
+    session_data = await ensure_valid_session()
+    client = InstacartClient(session_data)
+    try:
+        await client.init_session()
+        location_id = client._location_id
+
+        # Build item_ids from product URLs
+        product_map: dict[str, list[PreferredProduct]] = {}  # item_id -> products
+        for product in products:
+            pid = InstacartClient._extract_product_id_from_url(product.product_url)
+            if pid and location_id:
+                item_id = f"items_{location_id}-{pid}"
+                product_map.setdefault(item_id, []).append(product)
+
+        # Batch fetch in groups of 20
+        all_item_ids = list(product_map.keys())
+        updated = 0
+        for i in range(0, len(all_item_ids), 20):
+            batch = all_item_ids[i : i + 20]
+            fetched = await client.fetch_items_by_id(batch)
+            for result in fetched:
+                if result.item_id and result.item_id in product_map:
+                    for pp in product_map[result.item_id]:
+                        if result.product_name:
+                            pp.product_name = result.product_name
+                        if result.product_url:
+                            pp.product_url = result.product_url
+                        if result.brand:
+                            pp.brand = result.brand
+                        if result.image_url:
+                            pp.image_url = result.image_url
+                        if result.size:
+                            pp.size = result.size
+                        if result.in_stock:
+                            pp.last_seen_in_stock = datetime.now(UTC)
+                        updated += 1
+
+        db.commit()
+        logger.info("Backfill updated %d preferred products", updated)
+    except Exception as e:
+        logger.error("Backfill failed: %s", e)
+    finally:
+        await client.close()
+
+    return HTMLResponse(_render_all_items(request, db))
 
 
 @router.post("/items", response_class=HTMLResponse)

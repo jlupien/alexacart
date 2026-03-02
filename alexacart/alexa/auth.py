@@ -89,8 +89,17 @@ def _generate_pkce() -> tuple[str, str, str]:
     return code_verifier, code_challenge, device_serial
 
 
-def _build_oauth_url(code_challenge: str, device_serial: str) -> str:
-    """Build the Amazon OAuth URL that the Alexa app uses to initiate login."""
+def _build_oauth_url(
+    code_challenge: str, device_serial: str, force_fresh_auth: bool = True
+) -> str:
+    """Build the Amazon OAuth URL that the Alexa app uses to initiate login.
+
+    Args:
+        force_fresh_auth: If True, include PAPE max_auth_age=0 which forces
+            Amazon to require fresh authentication (ignore existing sessions).
+            Set to False for retry attempts where we want Amazon to accept the
+            existing session and auto-redirect with the auth code.
+    """
     from urllib.parse import urlencode
 
     client_id = f"{device_serial}#{DEVICE_TYPE}"
@@ -105,11 +114,12 @@ def _build_oauth_url(code_challenge: str, device_serial: str) -> str:
         "openid.mode": "checkid_setup",
         "openid.ns.oa2": "http://www.amazon.com/ap/ext/oauth/2",
         "openid.oa2.client_id": f"device:{client_id}",
-        "openid.ns.pape": "http://specs.openid.net/extensions/pape/1.0",
         "openid.oa2.scope": "device_auth_access",
         "openid.ns": "http://specs.openid.net/auth/2.0",
-        "openid.pape.max_auth_age": "0",
     }
+    if force_fresh_auth:
+        params["openid.ns.pape"] = "http://specs.openid.net/extensions/pape/1.0"
+        params["openid.pape.max_auth_age"] = "0"
     return f"https://www.amazon.com/ap/signin?{urlencode(params)}"
 
 
@@ -433,17 +443,31 @@ async def _retry_oauth_for_device_registration(page, _status) -> dict | None:
     parameters from the redirect). Since the user is now freshly authenticated,
     the second OAuth attempt should auto-redirect instantly with the auth code.
 
+    Two key fixes vs the initial attempt:
+    1. Navigate to amazon.com first — after maplanding (a 404 dead-end), the
+       session cookies aren't fully established for OAuth auto-redirect.
+    2. Build the OAuth URL WITHOUT max_auth_age=0 — that PAPE parameter forces
+       Amazon to require fresh authentication regardless of session state.
+       Without it, Amazon accepts the existing session and auto-redirects.
+
     Returns cookie data dict with registration info, or None if retry didn't work.
     """
     logger.info("Retrying OAuth for device registration...")
     _status("Retrying OAuth for device registration...")
 
+    # Navigate to amazon.com first to establish the session properly.
+    await page.get("https://www.amazon.com")
+    await page.sleep(3)
+    logger.info("OAuth retry: session established at amazon.com (URL: %s)", page.url)
+
     code_verifier, code_challenge, device_serial = _generate_pkce()
-    oauth_url = _build_oauth_url(code_challenge, device_serial)
+    # force_fresh_auth=False omits max_auth_age=0, allowing Amazon to accept
+    # the existing session and auto-redirect with the authorization code.
+    oauth_url = _build_oauth_url(code_challenge, device_serial, force_fresh_auth=False)
 
     captured_codes = await _setup_auth_code_interceptor(page)
     await page.get(oauth_url)
-    await page.sleep(4)
+    await page.sleep(5)
 
     # Check interceptor first, then page URL
     auth_code = None
@@ -454,6 +478,17 @@ async def _retry_oauth_for_device_registration(page, _status) -> dict | None:
         auth_code = await _try_extract_auth_code(page)
         if auth_code:
             logger.info("OAuth retry captured auth code from page URL")
+
+    if not auth_code:
+        # Check if we landed on maplanding (code might be in URL but not intercepted)
+        page_url = page.url or ""
+        logger.info("OAuth retry: page at %s after wait", page_url)
+        if _is_on_maplanding(page_url):
+            auth_code = _extract_auth_code_from_url(page_url)
+            if auth_code:
+                logger.info("OAuth retry captured auth code from maplanding URL")
+            else:
+                logger.info("OAuth retry: on maplanding but no auth code in URL")
 
     if auth_code:
         result = await _register_device(auth_code, code_verifier, device_serial)

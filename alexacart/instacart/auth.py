@@ -100,6 +100,7 @@ _JS_EXTRACT_FROM_PAGE = """
         [/"postalCode"\\s*:\\s*"(\\d{5})"/, 'postal_code'],
         [/"retailerInventorySessionToken"\\s*:\\s*"([^"]+)"/, 'retailer_inventory_session_token'],
         [/items_(\\d+)-\\d+/, 'retailer_location_id'],
+        [/"addressId"\\s*:\\s*"(\\d+)"/, 'address_id'],
     ];
 
     for (var i = 0; i < patterns.length; i++) {
@@ -134,6 +135,13 @@ _JS_EXTRACT_ADDRESS_ID = """
     for (var i = 0; i < scripts.length; i++) {
         if (scripts[i].textContent.length > 100) sources.push(scripts[i].textContent);
     }
+    // Also check localStorage — the SPA may persist address info there
+    try {
+        for (var i = 0; i < localStorage.length; i++) {
+            var val = localStorage.getItem(localStorage.key(i));
+            if (val && val.indexOf('addressId') >= 0) sources.push(val);
+        }
+    } catch(e) {}
     var text = sources.join('\\n');
     var m = text.match(/"addressId"\\s*:\\s*"(\\d+)"/);
     if (m) return m[1];
@@ -467,7 +475,7 @@ async def _extract_session_params(page, store_slug: str) -> dict:
                 params["retailer_location_id"] = segments[5]
 
     found_keys = [k for k in ("shop_id", "zone_id", "postal_code", "retailer_location_id",
-                               "retailer_inventory_session_token") if params.get(k)]
+                               "retailer_inventory_session_token", "address_id") if params.get(k)]
     logger.info("Session params discovered: %s", found_keys)
     return params
 
@@ -593,6 +601,26 @@ async def extract_session_via_nodriver(on_status=None) -> dict:
 
             _status("Logged in! Extracting session data...")
 
+        # Extract addressId from the store page before navigating away.
+        # The store page triggers ActiveCartId (which contains addressId)
+        # but those Performance API entries are lost after navigating to search.
+        address_id_early = None
+        current = page.url or ""
+        if "/store/" in current:
+            # Already on the store page — try extracting addressId
+            address_id_early = await _run_js(page, _JS_EXTRACT_ADDRESS_ID)
+            if not address_id_early:
+                # SPA may still be rendering; wait and retry
+                await page.sleep(3)
+                address_id_early = await _run_js(page, _JS_EXTRACT_ADDRESS_ID)
+        else:
+            # After login redirect we may not be on the store page
+            page = await browser.get(store_url)
+            await page.sleep(4)
+            address_id_early = await _run_js(page, _JS_EXTRACT_ADDRESS_ID)
+        if address_id_early:
+            logger.info("Found addressId from store page: %s", address_id_early)
+
         # Navigate to search page to trigger SearchResultsPlacements GraphQL call
         _status("Discovering session parameters...")
         page = await browser.get(search_url)
@@ -600,6 +628,11 @@ async def extract_session_via_nodriver(on_status=None) -> dict:
 
         # Extract session params
         session_params = await _extract_session_params(page, store_slug)
+
+        # Add early-discovered addressId if _extract_session_params didn't find it
+        if address_id_early and not session_params.get("address_id"):
+            session_params["address_id"] = address_id_early
+            logger.info("Using addressId from store page: %s", address_id_early)
 
         # Discover cart ID from within the browser context.
         # The browser has the correct household/family context, so

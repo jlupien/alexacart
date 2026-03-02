@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import httpx
 
 from alexacart.config import settings
+from alexacart.instacart.auth import load_instacart_cookies, save_instacart_cookies
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,25 @@ class InstacartClient:
             await self._client.aclose()
             self._client = None
 
+    def _persist_session_updates(self):
+        """Save discovered address_id / cart_id back to instacart_cookies.json."""
+        try:
+            data = load_instacart_cookies()
+            if not data:
+                return
+            changed = False
+            if self._address_id and data.get("session_params", {}).get("address_id") != self._address_id:
+                data.setdefault("session_params", {})["address_id"] = self._address_id
+                changed = True
+            if self._cart_id and data.get("cart_id") != self._cart_id:
+                data["cart_id"] = self._cart_id
+                changed = True
+            if changed:
+                save_instacart_cookies(data)
+                logger.info("Persisted session updates (address_id=%s, cart_id=%s)", self._address_id, self._cart_id)
+        except Exception as e:
+            logger.debug("Failed to persist session updates: %s", e)
+
     async def init_session(self):
         """Discover cart ID and validate session.
 
@@ -105,12 +125,18 @@ class InstacartClient:
         failed nodriver extraction), discover them via httpx by fetching the
         store page HTML.
         """
+        orig_address = self._address_id
+        orig_cart = self._cart_id
         if not self._address_id or not self._shop_id:
             await self._discover_session_context()
         if self._cart_id:
             await self._validate_cart_id()
         if not self._cart_id:
             await self._discover_cart_id()
+        # Persist newly discovered address_id / cart_id so future sessions
+        # don't need to re-discover them.
+        if self._address_id != orig_address or self._cart_id != orig_cart:
+            self._persist_session_updates()
 
     # ------------------------------------------------------------------
     # GraphQL transport

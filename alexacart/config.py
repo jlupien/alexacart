@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     debug_clear_amazon_cookies: bool = False
     debug_clear_instacart_cookies: bool = False
     data_dir: str = ""
+    local_data_dir: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
@@ -26,12 +27,18 @@ class Settings(BaseSettings):
         return _BASE_DIR / "data"
 
     @property
+    def resolved_local_data_dir(self) -> Path:
+        if self.local_data_dir:
+            return Path(self.local_data_dir)
+        return _BASE_DIR / "data"
+
+    @property
     def db_path(self) -> Path:
         return self.resolved_data_dir / "alexacart.db"
 
     @property
     def cookies_path(self) -> Path:
-        return self.resolved_data_dir / "cookies.json"
+        return self.resolved_local_data_dir / "cookies.json"
 
     @property
     def database_url(self) -> str:

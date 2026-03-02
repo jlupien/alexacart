@@ -14,6 +14,7 @@ SessionLocal = sessionmaker(bind=engine)
 
 def init_db() -> None:
     settings.resolved_data_dir.mkdir(parents=True, exist_ok=True)
+    settings.resolved_local_data_dir.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(engine)
     _migrate_order_log()
     _migrate_preferred_products()

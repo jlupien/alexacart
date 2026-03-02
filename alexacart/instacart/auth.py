@@ -25,7 +25,7 @@ INSTACART_BASE = "https://www.instacart.com"
 
 
 def _cookies_path() -> Path:
-    return settings.resolved_data_dir / "instacart_cookies.json"
+    return settings.resolved_local_data_dir / "instacart_cookies.json"
 
 
 def load_instacart_cookies() -> dict | None:
@@ -564,7 +564,7 @@ async def extract_session_via_nodriver(on_status=None, force_relogin=False) -> d
             on_status(msg)
 
     store_slug = settings.instacart_store.lower()
-    profile_dir = settings.resolved_data_dir / "nodriver-instacart"
+    profile_dir = settings.resolved_local_data_dir / "nodriver-instacart"
     profile_dir.mkdir(parents=True, exist_ok=True)
 
     if settings.debug_clear_instacart_cookies:

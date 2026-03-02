@@ -542,7 +542,7 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         if on_status:
             on_status(msg)
 
-    profile_dir = settings.resolved_data_dir / "nodriver-amazon"
+    profile_dir = settings.resolved_local_data_dir / "nodriver-amazon"
     profile_dir.mkdir(parents=True, exist_ok=True)
 
     if settings.debug_clear_amazon_cookies:

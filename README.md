@@ -35,9 +35,11 @@ cp .env.example .env
 ```
 
 ```
-# Directory for database and cookies (default: ./data/)
-# Point to a Dropbox/synced folder to share preferences across machines
+# Directory for database (preferences, order log) — can be synced across machines
 DATA_DIR=
+
+# Directory for login cookies and browser profiles — always local per machine
+LOCAL_DATA_DIR=
 
 ALEXA_LIST_NAME=Grocery List
 INSTACART_STORE=Wegmans
@@ -45,7 +47,8 @@ INSTACART_STORE=Wegmans
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DATA_DIR` | Where the DB and cookies are stored. Set to a synced folder (e.g. Dropbox) to share across machines. | `./data/` |
+| `DATA_DIR` | Where the SQLite DB is stored (preferences, aliases, order log). Set to a synced folder (e.g. Dropbox) to share preferences across machines. | `./data/` |
+| `LOCAL_DATA_DIR` | Where login cookies and nodriver browser profiles are stored. Always local per machine. | `./data/` |
 | `ALEXA_LIST_NAME` | Name of your Alexa shopping list | `Grocery List` |
 | `INSTACART_STORE` | Instacart store to search (must match the store name on Instacart) | `Wegmans` |
 

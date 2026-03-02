@@ -90,15 +90,20 @@ def _generate_pkce() -> tuple[str, str, str]:
 
 
 def _build_oauth_url(
-    code_challenge: str, device_serial: str, force_fresh_auth: bool = True
+    code_challenge: str,
+    device_serial: str,
+    force_fresh_auth: bool = True,
+    immediate: bool = False,
 ) -> str:
     """Build the Amazon OAuth URL that the Alexa app uses to initiate login.
 
     Args:
         force_fresh_auth: If True, include PAPE max_auth_age=0 which forces
             Amazon to require fresh authentication (ignore existing sessions).
-            Set to False for retry attempts where we want Amazon to accept the
-            existing session and auto-redirect with the auth code.
+        immediate: If True, use checkid_immediate mode which forces Amazon to
+            respond instantly (no login form). Used for retry after login — the
+            user is already authenticated so Amazon should auto-complete with
+            the full OAuth2 assertion including the authorization code.
     """
     from urllib.parse import urlencode
 
@@ -111,7 +116,7 @@ def _build_oauth_url(
         "openid.assoc_handle": "amzn_dp_project_dee_ios",
         "openid.identity": "http://specs.openid.net/auth/2.0/identifier_select",
         "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier_select",
-        "openid.mode": "checkid_setup",
+        "openid.mode": "checkid_immediate" if immediate else "checkid_setup",
         "openid.ns.oa2": "http://www.amazon.com/ap/ext/oauth/2",
         "openid.oa2.client_id": f"device:{client_id}",
         "openid.oa2.scope": "device_auth_access",
@@ -443,12 +448,10 @@ async def _retry_oauth_for_device_registration(page, _status) -> dict | None:
     parameters from the redirect). Since the user is now freshly authenticated,
     the second OAuth attempt should auto-redirect instantly with the auth code.
 
-    Two key fixes vs the initial attempt:
-    1. Navigate to amazon.com first — after maplanding (a 404 dead-end), the
-       session cookies aren't fully established for OAuth auto-redirect.
-    2. Build the OAuth URL WITHOUT max_auth_age=0 — that PAPE parameter forces
-       Amazon to require fresh authentication regardless of session state.
-       Without it, Amazon accepts the existing session and auto-redirects.
+    Uses checkid_immediate mode — this tells Amazon to respond instantly without
+    showing a login form. Since the user just authenticated, Amazon should
+    auto-complete with the full OAuth2 assertion (including the auth code that
+    was dropped during the 2FA flow).
 
     Returns cookie data dict with registration info, or None if retry didn't work.
     """
@@ -461,9 +464,11 @@ async def _retry_oauth_for_device_registration(page, _status) -> dict | None:
     logger.info("OAuth retry: session established at amazon.com (URL: %s)", page.url)
 
     code_verifier, code_challenge, device_serial = _generate_pkce()
-    # force_fresh_auth=False omits max_auth_age=0, allowing Amazon to accept
-    # the existing session and auto-redirect with the authorization code.
-    oauth_url = _build_oauth_url(code_challenge, device_serial, force_fresh_auth=False)
+    # immediate=True uses checkid_immediate mode — Amazon must respond instantly
+    # (no login form). force_fresh_auth=False omits max_auth_age=0.
+    oauth_url = _build_oauth_url(
+        code_challenge, device_serial, force_fresh_auth=False, immediate=True
+    )
 
     captured_codes = await _setup_auth_code_interceptor(page)
     await page.get(oauth_url)

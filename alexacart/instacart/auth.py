@@ -5,19 +5,18 @@ Uses nodriver (undetectable Chrome) to log into Instacart and extract
 session cookies + session parameters needed for API calls.
 
 Session parameters (shopId, zoneId, postalCode, retailerLocationId,
-retailerInventorySessionToken) are extracted by navigating to the store's
-search page and intercepting the GraphQL request variables via the
-Performance API.
+retailerInventorySessionToken) are extracted by injecting a fetch()
+interceptor via addScriptToEvaluateOnNewDocument that captures GraphQL
+request variables as the SPA makes them. Falls back to the Performance
+API and page script scanning if the interceptor misses anything.
 """
 
 import asyncio
 import json
 import logging
 import os
-import re
 from datetime import UTC, datetime
 from pathlib import Path
-
 from alexacart.config import settings
 
 logger = logging.getLogger(__name__)
@@ -60,19 +59,26 @@ _JS_EXTRACT_FROM_PERFORMANCE = """
     var entries = performance.getEntriesByType('resource');
     for (var i = 0; i < entries.length; i++) {
         var name = entries[i].name;
-        if (name.indexOf('graphql') >= 0 && name.indexOf('SearchResultsPlacements') >= 0) {
-            try {
-                var url = new URL(name);
-                var vars = JSON.parse(decodeURIComponent(url.searchParams.get('variables')));
+        if (name.indexOf('graphql') < 0) continue;
+        try {
+            var url = new URL(name);
+            var varsStr = url.searchParams.get('variables');
+            if (!varsStr) continue;
+            var vars = JSON.parse(decodeURIComponent(varsStr));
+
+            if (name.indexOf('ActiveCartId') >= 0) {
+                if (vars.addressId) result.address_id = vars.addressId;
+                if (vars.shopId && !result.shop_id) result.shop_id = vars.shopId;
+            }
+            if (name.indexOf('SearchResultsPlacements') >= 0) {
                 if (vars.shopId) result.shop_id = vars.shopId;
                 if (vars.zoneId) result.zone_id = vars.zoneId;
                 if (vars.postalCode) result.postal_code = vars.postalCode;
                 if (vars.retailerInventorySessionToken) {
                     result.retailer_inventory_session_token = vars.retailerInventorySessionToken;
                 }
-                break;
-            } catch(e) {}
-        }
+            }
+        } catch(e) {}
     }
     return JSON.stringify(result);
 })()
@@ -112,44 +118,6 @@ _JS_EXTRACT_FROM_PAGE = """
 })()
 """
 
-
-# Extract addressId from page data (for ActiveCartId fallback).
-# Looks in Performance API entries and __NEXT_DATA__.
-_JS_EXTRACT_ADDRESS_ID = """
-(function() {
-    var entries = performance.getEntriesByType('resource');
-    for (var i = 0; i < entries.length; i++) {
-        var name = entries[i].name;
-        if (name.indexOf('ActiveCartId') >= 0) {
-            try {
-                var url = new URL(name);
-                var vars = JSON.parse(decodeURIComponent(url.searchParams.get('variables')));
-                if (vars.addressId) return vars.addressId;
-            } catch(e) {}
-        }
-    }
-    var sources = [];
-    var nd = document.getElementById('__NEXT_DATA__');
-    if (nd) sources.push(nd.textContent);
-    var scripts = document.querySelectorAll('script');
-    for (var i = 0; i < scripts.length; i++) {
-        if (scripts[i].textContent.length > 100) sources.push(scripts[i].textContent);
-    }
-    // Also check localStorage — the SPA may persist address info there
-    try {
-        for (var i = 0; i < localStorage.length; i++) {
-            var val = localStorage.getItem(localStorage.key(i));
-            if (val && val.indexOf('addressId') >= 0) sources.push(val);
-        }
-    } catch(e) {}
-    var text = sources.join('\\n');
-    var m = text.match(/"addressId"\\s*:\\s*"(\\d+)"/);
-    if (m) return m[1];
-    m = text.match(/"address_id"\\s*:\\s*"?(\\d+)"?/);
-    if (m) return m[1];
-    return null;
-})()
-"""
 
 # Call ActiveCartId GraphQL query from browser context.
 # This allocates/discovers the correct cart (family if in household) for
@@ -320,6 +288,53 @@ _JS_GET_FIRST_ITEM_ID = """
 """
 
 
+# JavaScript fetch() interceptor injected via addScriptToEvaluateOnNewDocument.
+# Runs before any page JS, capturing GraphQL request variables from the SPA's
+# own fetch() calls. Data is persisted in sessionStorage so it survives
+# cross-page navigations (store page → search page).
+_JS_FETCH_INTERCEPTOR = """
+(function() {
+    var captured;
+    try {
+        captured = JSON.parse(sessionStorage.getItem('__ic_captured') || '{}');
+    } catch(e) {
+        captured = {};
+    }
+    window.__ic_captured = captured;
+
+    var origFetch = window.fetch;
+    window.fetch = function(input, init) {
+        var url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+        try {
+            if (url.indexOf('/graphql') !== -1 && url.indexOf('variables') !== -1) {
+                var u = new URL(url, location.origin);
+                var varsStr = u.searchParams.get('variables');
+                if (varsStr) {
+                    var vars = JSON.parse(varsStr);
+                    if (url.indexOf('ActiveCartId') !== -1) {
+                        if (vars.addressId) captured.address_id = vars.addressId;
+                        if (vars.shopId && !captured.shop_id) captured.shop_id = vars.shopId;
+                    }
+                    if (url.indexOf('SearchResultsPlacements') !== -1) {
+                        if (vars.shopId) captured.shop_id = vars.shopId;
+                        if (vars.zoneId) captured.zone_id = vars.zoneId;
+                        if (vars.postalCode) captured.postal_code = vars.postalCode;
+                        if (vars.retailerInventorySessionToken) {
+                            captured.retailer_inventory_session_token = vars.retailerInventorySessionToken;
+                        }
+                    }
+                    sessionStorage.setItem('__ic_captured', JSON.stringify(captured));
+                }
+            }
+        } catch(e) {}
+        return origFetch.apply(this, arguments);
+    };
+})();
+"""
+
+_JS_READ_INTERCEPTED = "JSON.stringify(window.__ic_captured || {})"
+
+
 async def _discover_cart_id_from_browser(
     page, store_slug: str, session_params: dict,
 ) -> str | None:
@@ -336,10 +351,9 @@ async def _discover_cart_id_from_browser(
        then extract the cart ID from the mutation response
     """
     # Strategy 1: ActiveCartId (needs addressId) — preferred, matches browser
-    address_id = await _run_js(page, _JS_EXTRACT_ADDRESS_ID)
+    address_id = session_params.get("address_id")
     if address_id:
-        logger.info("Found addressId from page: %s", address_id)
-        session_params["address_id"] = address_id
+        logger.info("Trying ActiveCartId with addressId=%s", address_id)
         active_js = (
             _JS_CALL_ACTIVE_CART_ID
             .replace("%ADDRESS_ID%", address_id)
@@ -357,9 +371,12 @@ async def _discover_cart_id_from_browser(
             except (json.JSONDecodeError, TypeError) as e:
                 logger.warning("Browser ActiveCartId parse error: %s", e)
     else:
-        logger.info("No addressId found on page — skipping ActiveCartId")
+        logger.info("No addressId available — skipping ActiveCartId")
 
     # Strategy 2: PersonalActiveCarts (fallback)
+    # Only accept if we find a family/household cart. If only personal carts
+    # exist, fall through to Strategy 3 which creates the correct family cart
+    # via browser context (the browser has household context that httpx lacks).
     js = _JS_DISCOVER_CART_ID.replace("%STORE_SLUG%", store_slug)
     raw = await _run_js(page, js, await_promise=True)
     if raw:
@@ -374,8 +391,14 @@ async def _discover_cart_id_from_browser(
                     "Browser PersonalActiveCarts: cart_id=%s (%s), household=%s, total_carts=%s",
                     result.get("cart_id"), cart_type, household, result.get("all_carts"),
                 )
-                if result.get("cart_id"):
+                if result.get("cart_id") and household:
                     return result["cart_id"]
+                if result.get("cart_id") and not household:
+                    logger.warning(
+                        "PersonalActiveCarts returned personal cart %s (no household) "
+                        "— falling through to browser-context cart allocation",
+                        result["cart_id"],
+                    )
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning("Browser PersonalActiveCarts parse error: %s (raw=%s)", e, raw[:200])
     else:
@@ -515,7 +538,7 @@ def _cleanup_stale_chrome(profile_dir: Path) -> None:
             pass
 
 
-async def extract_session_via_nodriver(on_status=None) -> dict:
+async def extract_session_via_nodriver(on_status=None, force_relogin=False) -> dict:
     """
     Login to Instacart via nodriver and extract session cookies + params.
 
@@ -525,6 +548,11 @@ async def extract_session_via_nodriver(on_status=None) -> dict:
     4. Extract session params from the GraphQL request
     5. Extract cookies
     6. Save everything to disk
+
+    Args:
+        on_status: Callback for status messages.
+        force_relogin: If True, skip headless check — open a visible browser
+            and navigate to login page for manual re-login.
 
     Returns dict with 'cookies' and 'session_params' keys.
     """
@@ -550,40 +578,70 @@ async def extract_session_via_nodriver(on_status=None) -> dict:
 
     _status("Checking Instacart login...")
     _cleanup_stale_chrome(profile_dir)
-    for attempt in range(3):
-        try:
-            browser = await uc.start(user_data_dir=str(profile_dir), headless=True)
-            break
-        except Exception as e:
-            if attempt < 2:
-                logger.warning("nodriver headless start attempt %d failed: %s", attempt + 1, e)
-                _cleanup_stale_chrome(profile_dir)
-                await asyncio.sleep(2)
-            else:
-                raise
+
+    logged_in = False
+
+    if force_relogin:
+        _status("Force re-login — opening Instacart login window...")
+        for attempt in range(3):
+            try:
+                browser = await uc.start(user_data_dir=str(profile_dir), headless=False)
+                break
+            except Exception as e:
+                if attempt < 2:
+                    logger.warning("nodriver start attempt %d failed: %s", attempt + 1, e)
+                    _cleanup_stale_chrome(profile_dir)
+                    await asyncio.sleep(2)
+                else:
+                    raise
+    else:
+        for attempt in range(3):
+            try:
+                browser = await uc.start(user_data_dir=str(profile_dir), headless=True)
+                break
+            except Exception as e:
+                if attempt < 2:
+                    logger.warning("nodriver headless start attempt %d failed: %s", attempt + 1, e)
+                    _cleanup_stale_chrome(profile_dir)
+                    await asyncio.sleep(2)
+                else:
+                    raise
 
     try:
-        page = await browser.get(store_url)
-        await page.sleep(3)
-
-        current_url = page.url or ""
-        logged_in = "/login" not in current_url and "/store/" in current_url
+        if not force_relogin:
+            # Check for real auth by navigating TO the login page.
+            # Logged-in users are redirected away from /login (to the store).
+            # This is more reliable than checking if a protected page
+            # redirects TO /login — the SPA redirect is slow and unreliable.
+            page = await browser.get(f"{INSTACART_BASE}/login")
+            for _ in range(4):
+                await page.sleep(2)
+                current_url = page.url or ""
+                if "/login" not in current_url and "/signin" not in current_url:
+                    logged_in = True
+                    logger.info("Instacart auth verified (redirected from login page)")
+                    break
+            else:
+                logged_in = False
+                logger.info("Instacart session not authenticated — stayed on login page")
 
         if not logged_in:
-            browser.stop()
-            await asyncio.sleep(1)
-            _status("Login needed — opening Instacart login window...")
+            if not force_relogin:
+                # Stop headless browser and start a visible one for manual login
+                browser.stop()
+                await asyncio.sleep(1)
+                _status("Login needed — opening Instacart login window...")
 
-            for attempt in range(3):
-                try:
-                    browser = await uc.start(user_data_dir=str(profile_dir), headless=False)
-                    break
-                except Exception as e:
-                    if attempt < 2:
-                        logger.warning("nodriver start attempt %d failed: %s", attempt + 1, e)
-                        await asyncio.sleep(2)
-                    else:
-                        raise
+                for attempt in range(3):
+                    try:
+                        browser = await uc.start(user_data_dir=str(profile_dir), headless=False)
+                        break
+                    except Exception as e:
+                        if attempt < 2:
+                            logger.warning("nodriver start attempt %d failed: %s", attempt + 1, e)
+                            await asyncio.sleep(2)
+                        else:
+                            raise
 
             page = await browser.get(f"{INSTACART_BASE}/login")
             await page.sleep(2)
@@ -601,38 +659,63 @@ async def extract_session_via_nodriver(on_status=None) -> dict:
 
             _status("Logged in! Extracting session data...")
 
-        # Extract addressId from the store page before navigating away.
-        # The store page triggers ActiveCartId (which contains addressId)
-        # but those Performance API entries are lost after navigating to search.
-        address_id_early = None
-        current = page.url or ""
-        if "/store/" in current:
-            # Already on the store page — try extracting addressId
-            address_id_early = await _run_js(page, _JS_EXTRACT_ADDRESS_ID)
-            if not address_id_early:
-                # SPA may still be rendering; wait and retry
-                await page.sleep(3)
-                address_id_early = await _run_js(page, _JS_EXTRACT_ADDRESS_ID)
-        else:
-            # After login redirect we may not be on the store page
-            page = await browser.get(store_url)
-            await page.sleep(4)
-            address_id_early = await _run_js(page, _JS_EXTRACT_ADDRESS_ID)
-        if address_id_early:
-            logger.info("Found addressId from store page: %s", address_id_early)
-
-        # Navigate to search page to trigger SearchResultsPlacements GraphQL call
+        # Inject a fetch() interceptor BEFORE any page loads.
+        # addScriptToEvaluateOnNewDocument runs before the page's own JS,
+        # so it captures every GraphQL fetch() the SPA makes — including
+        # ActiveCartId (addressId) and SearchResultsPlacements (session params).
+        # This is more reliable than CDP event handlers (which don't fire
+        # reliably with nodriver's page.get()) and the Performance API
+        # (which loses entries on navigation).
         _status("Discovering session parameters...")
+        await page.send(uc.cdp.page.add_script_to_evaluate_on_new_document(
+            source=_JS_FETCH_INTERCEPTOR,
+        ))
+
+        # Navigate to store page — SPA makes ActiveCartId call (has addressId)
+        page = await browser.get(store_url)
+        await page.sleep(5)
+
+        # Extract params from store page (Performance API has ActiveCartId entries)
+        store_params = await _extract_session_params(page, store_slug)
+
+        # Read fetch interceptor data from store page (bonus layer)
+        intercepted = {}
+        raw = await _run_js(page, _JS_READ_INTERCEPTED)
+        if raw:
+            try:
+                intercepted = json.loads(raw)
+                if intercepted:
+                    logger.info("Fetch interceptor captured (store page): %s", list(intercepted.keys()))
+            except json.JSONDecodeError:
+                pass
+
+        # Navigate to search page — SPA makes SearchResultsPlacements call
         page = await browser.get(search_url)
         await page.sleep(5)
 
-        # Extract session params
+        # Read fetch interceptor data (includes store page data via sessionStorage)
+        raw = await _run_js(page, _JS_READ_INTERCEPTED)
+        if raw:
+            try:
+                found = json.loads(raw)
+                if found:
+                    intercepted.update(found)
+                    logger.info("Fetch interceptor captured (search page): %s", list(found.keys()))
+            except json.JSONDecodeError:
+                pass
+
+        # Extract params from search page (Performance API has SearchResultsPlacements)
         session_params = await _extract_session_params(page, store_slug)
 
-        # Add early-discovered addressId if _extract_session_params didn't find it
-        if address_id_early and not session_params.get("address_id"):
-            session_params["address_id"] = address_id_early
-            logger.info("Using addressId from store page: %s", address_id_early)
+        # Merge store page params (has addressId from ActiveCartId)
+        for k, v in store_params.items():
+            if v and not session_params.get(k):
+                session_params[k] = v
+
+        # Merge fetch-intercepted params (bonus layer)
+        for k, v in intercepted.items():
+            if v and not session_params.get(k):
+                session_params[k] = v
 
         # Discover cart ID from within the browser context.
         # The browser has the correct household/family context, so

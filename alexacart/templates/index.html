@@ -23,4 +23,16 @@
 </div>
 
 <div id="order-status"></div>
+
+<div class="logout-section">
+    <button
+        class="btn btn-sm btn-secondary"
+        hx-post="/order/logout-instacart"
+        hx-target="#logout-status"
+        hx-confirm="Clear Instacart login? You'll need to log in again on the next order."
+    >
+        Re-login to Instacart
+    </button>
+    <div id="logout-status"></div>
+</div>
 {% endblock %}

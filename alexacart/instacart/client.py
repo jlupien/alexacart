@@ -316,16 +316,23 @@ class InstacartClient:
         """Add a product to the Instacart cart by item_id."""
         # Use a lock to ensure only one concurrent caller discovers/creates
         # the cart — prevents multiple orphan carts when items are added in
-        # parallel via asyncio.gather.
+        # parallel via asyncio.gather. The first add without a cartId lets
+        # the server allocate the correct cart; the lock ensures subsequent
+        # adds wait for that cart ID before proceeding.
         if not self._cart_id:
             async with self._cart_lock:
                 if not self._cart_id:
                     await self._discover_cart_id()
+                if not self._cart_id:
+                    # No cart discovered — let the server allocate one via
+                    # this first add (without cartId), then capture the ID.
+                    result = await self._do_add(item_id, quantity)
+                    return result
 
-        if not self._cart_id:
-            logger.error("Cannot add to cart — no cart ID discovered")
-            return False
+        return await self._do_add(item_id, quantity)
 
+    async def _do_add(self, item_id: str, quantity: int) -> bool:
+        """Send the UpdateCartItemsMutation for a single item."""
         variables = {
             "cartItemUpdates": [
                 {
@@ -336,17 +343,40 @@ class InstacartClient:
             ],
             "cartType": "grocery",
             "requestTimestamp": int(time.time() * 1000),
-            "cartId": self._cart_id,
         }
+        # Only include cartId if we have one. Omitting it lets the server
+        # allocate the correct cart (family if in household) on first add —
+        # same as the web app does. PersonalActiveCarts returns empty when
+        # no cart exists yet, so this handles the cold-start case.
+        if self._cart_id:
+            variables["cartId"] = self._cart_id
 
         try:
             data = await self._graphql_post("UpdateCartItemsMutation", variables)
+            logger.debug(
+                "UpdateCartItemsMutation full response: %s",
+                json.dumps(data, default=str)[:2000],
+            )
             result = data.get("data", {}).get("updateCartItems", {})
             typename = result.get("__typename", "")
+            cart_info = result.get("cart", {}) or {}
+            result_cart_id = cart_info.get("id", "?")
+            item_count = len(cart_info.get("items", []))
             if "Success" in typename:
-                logger.info("Added %s to cart (qty=%d)", item_id, quantity)
+                logger.info(
+                    "Added %s to cart %s (qty=%d, cart_items=%d)",
+                    item_id, result_cart_id, quantity, item_count,
+                )
+                # Capture the server-allocated cart ID for subsequent adds
+                if not self._cart_id and result_cart_id and result_cart_id != "?":
+                    self._cart_id = result_cart_id
+                    logger.info("Captured server-allocated cart ID: %s", result_cart_id)
+                    self._persist_session_updates()
                 return True
-            logger.warning("Add to cart response type: %s — full response: %s", typename, json.dumps(result)[:500])
+            logger.warning(
+                "Add to cart response type: %s, cart_id=%s — full response: %s",
+                typename, result_cart_id, json.dumps(result)[:500],
+            )
             return False
         except Exception as e:
             logger.error("Add to cart failed for %s: %s", item_id, e)

@@ -103,6 +103,32 @@ async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 
+@router.post("/logout-instacart")
+async def logout_instacart():
+    """Clear Instacart session data so the next order triggers a fresh login."""
+    import shutil
+
+    from alexacart.instacart.auth import _cookies_path
+
+    # Remove saved cookies/session
+    path = _cookies_path()
+    if path.exists():
+        path.unlink()
+        logger.info("Deleted %s", path)
+
+    # Remove Chrome profile to clear browser login state
+    profile_dir = settings.resolved_data_dir / "nodriver-instacart"
+    if profile_dir.exists():
+        shutil.rmtree(profile_dir, ignore_errors=True)
+        logger.info("Deleted Instacart Chrome profile: %s", profile_dir)
+
+    return HTMLResponse(
+        '<div class="alert alert-success">'
+        "Instacart session cleared. You'll be prompted to log in on your next order."
+        "</div>"
+    )
+
+
 @router.post("/start")
 async def start_order(request: Request):
     """Start the order flow. Launches browser, checks logins, fetches Alexa list, searches."""

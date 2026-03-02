@@ -439,70 +439,96 @@ async def _wait_for_oauth_redirect(
     return None
 
 
-async def _retry_oauth_for_device_registration(page, _status) -> dict | None:
+async def _retry_oauth_for_device_registration(browser, _status) -> dict | None:
     """
-    Retry the OAuth flow to capture an authorization code for device registration.
+    Retry the OAuth flow via direct HTTP to capture an authorization code.
 
-    Called when the initial login succeeded but the auth code wasn't captured
-    (e.g. 2FA or security checks caused Amazon to drop the OAuth2 extension
-    parameters from the redirect). Since the user is now freshly authenticated,
-    the second OAuth attempt should auto-redirect instantly with the auth code.
+    Called when the initial browser login succeeded but the auth code wasn't
+    captured (e.g. 2FA or security checks caused Amazon to drop the OAuth2
+    extension parameters from the redirect).
 
-    Uses checkid_immediate mode — this tells Amazon to respond instantly without
-    showing a login form. Since the user just authenticated, Amazon should
-    auto-complete with the full OAuth2 assertion (including the auth code that
-    was dropped during the 2FA flow).
+    Uses the cookies from the browser session to make a clean OAuth request
+    via httpx. Since this is a pure HTTP redirect (no browser rendering, no
+    2FA interruption), Amazon should include the full OAuth2 assertion with
+    the authorization code.
 
     Returns cookie data dict with registration info, or None if retry didn't work.
     """
-    logger.info("Retrying OAuth for device registration...")
+    logger.info("Retrying OAuth for device registration via HTTP...")
     _status("Retrying OAuth for device registration...")
 
-    # Navigate to amazon.com first to establish the session properly.
-    await page.get("https://www.amazon.com")
-    await page.sleep(3)
-    logger.info("OAuth retry: session established at amazon.com (URL: %s)", page.url)
+    # Extract cookies from the browser session
+    all_cookies = await browser.cookies.get_all()
+    cookie_dict = {}
+    for c in all_cookies:
+        domain = getattr(c, "domain", "") or ""
+        name = getattr(c, "name", "") or ""
+        value = getattr(c, "value", "") or ""
+        if "amazon" in domain and name and value:
+            cookie_dict[name] = value
+
+    if not cookie_dict:
+        logger.info("OAuth retry: no Amazon cookies available from browser")
+        return None
+
+    logger.info("OAuth retry: using %d browser cookies for HTTP request", len(cookie_dict))
 
     code_verifier, code_challenge, device_serial = _generate_pkce()
-    # immediate=True uses checkid_immediate mode — Amazon must respond instantly
-    # (no login form). force_fresh_auth=False omits max_auth_age=0.
     oauth_url = _build_oauth_url(
-        code_challenge, device_serial, force_fresh_auth=False, immediate=True
+        code_challenge, device_serial, force_fresh_auth=False
     )
 
-    captured_codes = await _setup_auth_code_interceptor(page)
-    await page.get(oauth_url)
-    await page.sleep(5)
+    jar = httpx.Cookies()
+    for name, value in cookie_dict.items():
+        jar.set(name, value, domain=".amazon.com")
 
-    # Check interceptor first, then page URL
-    auth_code = None
-    if captured_codes:
-        auth_code = captured_codes[0]
-        logger.info("OAuth retry captured auth code via interceptor")
-    else:
-        auth_code = await _try_extract_auth_code(page)
-        if auth_code:
-            logger.info("OAuth retry captured auth code from page URL")
+    try:
+        async with httpx.AsyncClient(
+            timeout=30.0, follow_redirects=True, cookies=jar
+        ) as client:
+            resp = await client.get(
+                oauth_url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": (
+                        "text/html,application/xhtml+xml,application/xml;"
+                        "q=0.9,*/*;q=0.8"
+                    ),
+                },
+            )
 
-    if not auth_code:
-        # Check if we landed on maplanding (code might be in URL but not intercepted)
-        page_url = page.url or ""
-        logger.info("OAuth retry: page at %s after wait", page_url)
-        if _is_on_maplanding(page_url):
-            auth_code = _extract_auth_code_from_url(page_url)
+            final_url = str(resp.url)
+            logger.info("OAuth retry HTTP: status=%d, final URL: %s", resp.status_code, final_url[:200])
+
+            # Check final URL for auth code
+            auth_code = _extract_auth_code_from_url(final_url)
+            if not auth_code:
+                # Check redirect history — the code may appear in an intermediate redirect
+                for r in resp.history:
+                    location = r.headers.get("location", "")
+                    auth_code = _extract_auth_code_from_url(location)
+                    if auth_code:
+                        logger.info("OAuth retry: found auth code in redirect history")
+                        break
+
             if auth_code:
-                logger.info("OAuth retry captured auth code from maplanding URL")
+                logger.info("OAuth retry: captured auth code via HTTP")
+                result = await _register_device(auth_code, code_verifier, device_serial)
+                if result:
+                    _status("Device registered — refresh token saved")
+                    return result
+                logger.warning("OAuth retry: device registration failed despite auth code")
             else:
-                logger.info("OAuth retry: on maplanding but no auth code in URL")
-
-    if auth_code:
-        result = await _register_device(auth_code, code_verifier, device_serial)
-        if result:
-            _status("Device registered — refresh token saved")
-            return result
-        logger.warning("OAuth retry: device registration failed despite capturing auth code")
-    else:
-        logger.info("OAuth retry: no auth code captured, falling back to cookie extraction")
+                logger.info(
+                    "OAuth retry HTTP: no auth code in response (redirects: %d)",
+                    len(resp.history),
+                )
+    except Exception as e:
+        logger.warning("OAuth retry HTTP error: %s", e)
 
     return None
 
@@ -689,7 +715,7 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
                 logger.warning("Device registration failed after re-login, falling back to cookie extraction")
             else:
                 # Retry OAuth — user just re-logged in, second attempt should auto-redirect with auth code
-                retry_result = await _retry_oauth_for_device_registration(page, _status)
+                retry_result = await _retry_oauth_for_device_registration(browser, _status)
                 if retry_result:
                     return retry_result
 
@@ -755,7 +781,7 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
             else:
                 logger.info("On maplanding but no auth code (URL: %s)", page_url)
                 # Retry OAuth — user is authenticated, second attempt should auto-redirect with auth code
-                retry_result = await _retry_oauth_for_device_registration(page, _status)
+                retry_result = await _retry_oauth_for_device_registration(browser, _status)
                 if retry_result:
                     return retry_result
             _status("Already logged into Amazon")
@@ -797,7 +823,7 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
             logger.warning("Device registration failed after login, falling back to cookie extraction")
         else:
             # Retry OAuth — user just logged in, second attempt should auto-redirect with auth code
-            retry_result = await _retry_oauth_for_device_registration(page, _status)
+            retry_result = await _retry_oauth_for_device_registration(browser, _status)
             if retry_result:
                 return retry_result
 

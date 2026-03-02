@@ -441,94 +441,76 @@ async def _wait_for_oauth_redirect(
 
 async def _retry_oauth_for_device_registration(browser, _status) -> dict | None:
     """
-    Retry the OAuth flow via direct HTTP to capture an authorization code.
+    Retry the OAuth flow using the browser's own fetch() to capture an auth code.
 
     Called when the initial browser login succeeded but the auth code wasn't
-    captured (e.g. 2FA or security checks caused Amazon to drop the OAuth2
-    extension parameters from the redirect).
+    captured (e.g. 2FA caused Amazon to drop the OAuth2 extension parameters).
 
-    Uses the cookies from the browser session to make a clean OAuth request
-    via httpx. Since this is a pure HTTP redirect (no browser rendering, no
-    2FA interruption), Amazon should include the full OAuth2 assertion with
-    the authorization code.
+    Uses in-browser fetch() rather than httpx — this sends the full session
+    cookies, TLS fingerprint, and browser state that Amazon expects. Plain
+    HTTP requests to /ap/signin get rejected (Amazon returns the login page).
 
     Returns cookie data dict with registration info, or None if retry didn't work.
     """
-    logger.info("Retrying OAuth for device registration via HTTP...")
+    logger.info("Retrying OAuth for device registration...")
     _status("Retrying OAuth for device registration...")
 
-    # Extract cookies from the browser session
-    all_cookies = await browser.cookies.get_all()
-    cookie_dict = {}
-    for c in all_cookies:
-        domain = getattr(c, "domain", "") or ""
-        name = getattr(c, "name", "") or ""
-        value = getattr(c, "value", "") or ""
-        if "amazon" in domain and name and value:
-            cookie_dict[name] = value
+    page = browser.main_tab
 
-    if not cookie_dict:
-        logger.info("OAuth retry: no Amazon cookies available from browser")
-        return None
-
-    logger.info("OAuth retry: using %d browser cookies for HTTP request", len(cookie_dict))
+    # Navigate to amazon.com to ensure we're on the correct origin
+    await page.get("https://www.amazon.com")
+    await page.sleep(2)
+    logger.info("OAuth retry: on amazon.com (URL: %s)", page.url)
 
     code_verifier, code_challenge, device_serial = _generate_pkce()
     oauth_url = _build_oauth_url(
         code_challenge, device_serial, force_fresh_auth=False
     )
 
-    jar = httpx.Cookies()
-    for name, value in cookie_dict.items():
-        jar.set(name, value, domain=".amazon.com")
+    # Use in-browser fetch() — has full session context (cookies, TLS, etc.)
+    js_url = json.dumps(oauth_url)
+    js = f"""
+    (async function() {{
+        try {{
+            var resp = await fetch({js_url}, {{
+                credentials: 'include',
+                redirect: 'follow'
+            }});
+            return JSON.stringify({{url: resp.url, status: resp.status}});
+        }} catch(e) {{
+            return JSON.stringify({{error: e.message}});
+        }}
+    }})()
+    """
 
     try:
-        async with httpx.AsyncClient(
-            timeout=30.0, follow_redirects=True, cookies=jar
-        ) as client:
-            resp = await client.get(
-                oauth_url,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    ),
-                    "Accept": (
-                        "text/html,application/xhtml+xml,application/xml;"
-                        "q=0.9,*/*;q=0.8"
-                    ),
-                },
-            )
+        raw = await page.evaluate(js, await_promise=True)
+        result_str = raw if isinstance(raw, str) else getattr(raw, "value", None)
+        if not result_str:
+            logger.info("OAuth retry: fetch returned no result")
+            return None
 
-            final_url = str(resp.url)
-            logger.info("OAuth retry HTTP: status=%d, final URL: %s", resp.status_code, final_url[:200])
+        fetch_result = json.loads(result_str)
+        if fetch_result.get("error"):
+            logger.warning("OAuth retry fetch error: %s", fetch_result["error"])
+            return None
 
-            # Check final URL for auth code
-            auth_code = _extract_auth_code_from_url(final_url)
-            if not auth_code:
-                # Check redirect history — the code may appear in an intermediate redirect
-                for r in resp.history:
-                    location = r.headers.get("location", "")
-                    auth_code = _extract_auth_code_from_url(location)
-                    if auth_code:
-                        logger.info("OAuth retry: found auth code in redirect history")
-                        break
+        final_url = fetch_result.get("url", "")
+        status = fetch_result.get("status")
+        logger.info("OAuth retry fetch: status=%s, URL=%s", status, final_url[:200])
 
-            if auth_code:
-                logger.info("OAuth retry: captured auth code via HTTP")
-                result = await _register_device(auth_code, code_verifier, device_serial)
-                if result:
-                    _status("Device registered — refresh token saved")
-                    return result
-                logger.warning("OAuth retry: device registration failed despite auth code")
-            else:
-                logger.info(
-                    "OAuth retry HTTP: no auth code in response (redirects: %d)",
-                    len(resp.history),
-                )
+        auth_code = _extract_auth_code_from_url(final_url)
+        if auth_code:
+            logger.info("OAuth retry: captured auth code via in-browser fetch")
+            reg_result = await _register_device(auth_code, code_verifier, device_serial)
+            if reg_result:
+                _status("Device registered — refresh token saved")
+                return reg_result
+            logger.warning("OAuth retry: device registration failed despite auth code")
+        else:
+            logger.info("OAuth retry: no auth code in fetch response URL")
     except Exception as e:
-        logger.warning("OAuth retry HTTP error: %s", e)
+        logger.warning("OAuth retry error: %s", e)
 
     return None
 
@@ -684,9 +666,13 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
             shutil.rmtree(session_dir, ignore_errors=True)
             logger.info("Cleared session storage: %s", session_dir)
 
-    # Generate PKCE + OAuth URL for device registration
+    # Generate PKCE + OAuth URL for device registration.
+    # force_fresh_auth=False omits max_auth_age=0, which avoids forcing 2FA.
+    # When 2FA is triggered, Amazon drops the OAuth2 extension (authorization_code)
+    # from the redirect. Without max_auth_age=0, warm Chrome profiles can
+    # auto-redirect with the auth code intact.
     code_verifier, code_challenge, device_serial = _generate_pkce()
-    oauth_url = _build_oauth_url(code_challenge, device_serial)
+    oauth_url = _build_oauth_url(code_challenge, device_serial, force_fresh_auth=False)
 
     if force_relogin:
         # Skip headless check — open visible browser and force a fresh login
@@ -807,7 +793,7 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         _status("Login needed — opening Amazon login window...")
         # Generate fresh PKCE to avoid server-side state issues from the headless attempt
         code_verifier, code_challenge, device_serial = _generate_pkce()
-        oauth_url = _build_oauth_url(code_challenge, device_serial)
+        oauth_url = _build_oauth_url(code_challenge, device_serial, force_fresh_auth=False)
         browser = await _start_browser(profile_dir, headless=False, start_url=oauth_url)
         page = browser.main_tab
         captured_codes = await _setup_auth_code_interceptor(page)

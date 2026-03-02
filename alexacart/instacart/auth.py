@@ -657,12 +657,24 @@ async def extract_session_via_nodriver(on_status=None, force_relogin=False) -> d
             await page.sleep(2)
 
             _status("Waiting for Instacart login — please log in via the browser window...")
+            non_login_count = 0
             for _ in range(120):
                 await page.sleep(3)
                 current_url = page.url or ""
-                if "/login" not in current_url:
-                    logged_in = True
-                    break
+                if (
+                    "/login" not in current_url
+                    and "/signin" not in current_url
+                    and "/sign-in" not in current_url
+                    and "/signup" not in current_url
+                ):
+                    # Require 2 consecutive checks (6+ seconds) to avoid false positives
+                    # from brief redirects during page load
+                    non_login_count += 1
+                    if non_login_count >= 2:
+                        logged_in = True
+                        break
+                else:
+                    non_login_count = 0
 
             if not logged_in:
                 raise RuntimeError("Timed out waiting for Instacart login")

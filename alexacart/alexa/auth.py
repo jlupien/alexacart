@@ -729,11 +729,13 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         code_verifier, code_challenge, device_serial = _generate_pkce()
         oauth_url = _build_oauth_url(code_challenge, device_serial)
         browser = await _start_browser(profile_dir, headless=False)
-        # Set up interceptor BEFORE navigating so we catch instant redirects
-        page = await browser.get("about:blank")
+        # Navigate directly to OAuth URL (using browser.get to ensure the
+        # visible tab navigates — page.get on an about:blank tab is unreliable)
+        page = await browser.get(oauth_url)
+        # Set up interceptor to catch the post-login redirect auth code
         captured_codes = await _setup_auth_code_interceptor(page)
-        await page.get(oauth_url)
         await page.sleep(2)
+        logger.info("Visible browser navigated to OAuth URL, page at: %s", page.url)
 
         _status("Waiting for Amazon login — please log in via the browser window...")
         auth_code = await _wait_for_oauth_redirect(page, captured_codes=captured_codes)

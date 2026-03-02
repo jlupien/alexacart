@@ -23,7 +23,7 @@
 {% for session_id, entries in sessions %}
 <div class="card" id="history-{{ session_id[:8] }}">
     <div class="pref-header">
-        <h3>{{ entries[0].created_at.strftime('%B %d, %Y at %I:%M %p') }}</h3>
+        <h3>{{ (entries[0].created_at | to_nyc).strftime('%B %d, %Y at %I:%M %p') }}</h3>
         <div style="display: flex; align-items: center; gap: 0.75rem;">
             <span class="muted">Session: {{ session_id[:8] }}</span>
             <button

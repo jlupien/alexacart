@@ -456,9 +456,46 @@ main {
     margin-bottom: 2rem;
 }
 
-.logout-section {
-    margin-top: 2rem;
-    padding-top: 1rem;
+/* Settings page */
+.settings-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+@media (max-width: 768px) {
+    .settings-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.settings-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1rem;
+}
+
+.settings-table td {
+    padding: 0.375rem 0.5rem;
+    font-size: 0.875rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+}
+
+.settings-table tr:last-child td {
+    border-bottom: none;
+}
+
+.settings-label {
+    color: var(--text-muted);
+    white-space: nowrap;
+    width: 1%;
+    padding-right: 1rem !important;
+}
+
+.settings-actions {
+    padding-top: 0.75rem;
     border-top: 1px solid var(--border);
 }
 

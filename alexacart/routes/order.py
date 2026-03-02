@@ -29,7 +29,6 @@ from alexacart.matching.matcher import (
     add_preferred_product,
     create_grocery_item,
     find_match,
-    make_product_top_choice,
     normalize_text,
 )
 from alexacart.models import Alias, OrderLog
@@ -101,32 +100,6 @@ class OrderSession:
 @router.get("/")
 async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
-
-
-@router.post("/logout-instacart")
-async def logout_instacart():
-    """Clear Instacart session data so the next order triggers a fresh login."""
-    import shutil
-
-    from alexacart.instacart.auth import _cookies_path
-
-    # Remove saved cookies/session
-    path = _cookies_path()
-    if path.exists():
-        path.unlink()
-        logger.info("Deleted %s", path)
-
-    # Remove Chrome profile to clear browser login state
-    profile_dir = settings.resolved_data_dir / "nodriver-instacart"
-    if profile_dir.exists():
-        shutil.rmtree(profile_dir, ignore_errors=True)
-        logger.info("Deleted Instacart Chrome profile: %s", profile_dir)
-
-    return HTMLResponse(
-        '<div class="alert alert-success">'
-        "Instacart session cleared. You'll be prompted to log in on your next order."
-        "</div>"
-    )
 
 
 @router.post("/start")
@@ -891,7 +864,6 @@ async def _commit_single_item(
                 brand=data.get("brand"),
                 image_url=image_url,
                 size=size or None,
-                was_corrected=was_corrected,
             )
 
         db.commit()
@@ -1122,18 +1094,13 @@ def _learn_from_result(
     product_url: str | None,
     brand: str | None,
     image_url: str | None,
-    was_corrected: bool,
     size: str | None = None,
 ):
     """Learn from the user's choices to improve future proposals."""
     if grocery_item_id:
         # Known item
-        if was_corrected:
-            # User changed the proposal — make their choice the top preference
-            make_product_top_choice(db, grocery_item_id, final_product, product_url=product_url, brand=brand, image_url=image_url, size=size)
-        else:
-            # User accepted — ensure product is in preferences (dedup by URL then name)
-            add_preferred_product(db, grocery_item_id, final_product, product_url=product_url, brand=brand, image_url=image_url, size=size)
+        # Ensure product is in preferences (dedup by URL then name); new entries go to last place
+        add_preferred_product(db, grocery_item_id, final_product, product_url=product_url, brand=brand, image_url=image_url, size=size)
     else:
         # Unknown item — create new grocery item + alias + preferred product
         item = create_grocery_item(db, alexa_text)

@@ -24,6 +24,9 @@ CLAUDE.md
 # Debugging
 logs.txt
 
+# macOS app bundle (contains machine-specific paths)
+AlexaCart.app
+
 # API research
 HAR
 

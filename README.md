@@ -60,6 +60,16 @@ uv run python run.py
 
 Open http://127.0.0.1:8000 in your browser.
 
+### macOS App Launcher (optional)
+
+Build a clickable `.app` bundle so you don't need a terminal:
+
+```bash
+bash scripts/build_macos_app.sh
+```
+
+This creates `AlexaCart.app` in the project root. Double-click it (or drag it to your Dock) to start the server and open the browser automatically. When you're done, click **Shut Down Server** on the Settings page to stop everything.
+
 ## Usage
 
 ### Start an Order
@@ -110,8 +120,11 @@ alexacart/
 │   │   └── matcher.py        # Alias resolution + preference lookup
 │   ├── routes/
 │   │   ├── order.py          # Order flow endpoints
-│   │   └── preferences.py    # Preference CRUD
+│   │   ├── preferences.py    # Preference CRUD
+│   │   └── settings.py       # Settings + server shutdown
 │   ├── templates/            # Jinja2 templates
 │   └── static/               # CSS + JS
+├── scripts/
+│   └── build_macos_app.sh    # Generates AlexaCart.app
 └── data/                     # Runtime data (gitignored)
 ```

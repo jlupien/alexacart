@@ -4,10 +4,14 @@ Settings page routes:
 - POST /settings/check-amazon — validate Amazon cookies against API
 - POST /settings/logout-amazon — clear Amazon session data
 - POST /settings/logout-instacart — clear Instacart session data
+- POST /settings/shutdown — gracefully stop the server
 """
 
+import asyncio
 import json
 import logging
+import os
+import signal
 import shutil
 
 from fastapi import APIRouter, Depends, Request
@@ -165,5 +169,24 @@ async def logout_instacart():
     return HTMLResponse(
         '<div class="alert alert-success">'
         "Instacart session cleared. You'll be prompted to log in on your next order."
+        "</div>"
+    )
+
+
+@router.post("/shutdown")
+async def shutdown_server():
+    """Gracefully stop the server (used by the macOS app launcher)."""
+    logger.info("Shutdown requested via settings UI")
+
+    async def _delayed_shutdown():
+        await asyncio.sleep(0.5)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    asyncio.create_task(_delayed_shutdown())
+
+    return HTMLResponse(
+        '<div style="text-align:center; padding:4rem 1rem;">'
+        "<h2>Server shutting down&hellip;</h2>"
+        "<p>You can close this tab.</p>"
         "</div>"
     )

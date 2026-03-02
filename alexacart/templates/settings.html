@@ -194,4 +194,20 @@
         </tr>
     </table>
 </div>
+
+<!-- Server Card -->
+<div class="card">
+    <h2>Server</h2>
+    <p>Stop the AlexaCart server. Use this when you're done and want to quit the app.</p>
+    <div class="settings-actions">
+        <button
+            class="btn btn-sm btn-secondary"
+            hx-post="/settings/shutdown"
+            hx-target="body"
+            hx-confirm="Shut down the AlexaCart server? You'll need to relaunch the app to use it again."
+        >
+            Shut Down Server
+        </button>
+    </div>
+</div>
 {% endblock %}

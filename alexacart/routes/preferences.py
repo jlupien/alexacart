@@ -171,22 +171,6 @@ async def delete_alias(request: Request, alias_id: int, db: Session = Depends(ge
     return HTMLResponse("")
 
 
-@router.post("/items/{item_id}/products", response_class=HTMLResponse)
-async def add_item_product(
-    request: Request,
-    item_id: int,
-    product_name: str = Form(...),
-    product_url: str = Form(""),
-    brand: str = Form(""),
-    db: Session = Depends(get_db),
-):
-    """Add a preferred product to a grocery item."""
-    add_preferred_product(db, item_id, product_name, product_url=product_url or None, brand=brand or None)
-    db.commit()
-    item = db.get(GroceryItem, item_id)
-    return HTMLResponse(_render_item(request, item))
-
-
 @router.post("/items/{item_id}/products/from-url", response_class=HTMLResponse)
 async def add_product_from_url(
     request: Request,

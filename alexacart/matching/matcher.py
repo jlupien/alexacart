@@ -109,7 +109,7 @@ def add_preferred_product(
     db: Session,
     grocery_item_id: int,
     product_name: str,
-    product_url: str | None = None,
+    product_url: str,
     brand: str | None = None,
     image_url: str | None = None,
     rank: int | None = None,
@@ -122,16 +122,14 @@ def add_preferred_product(
     If rank is specified, shift existing products down.
     """
     # Deduplicate by URL first, then by name
-    existing = None
-    if product_url:
-        existing = (
-            db.query(PreferredProduct)
-            .filter(
-                PreferredProduct.grocery_item_id == grocery_item_id,
-                PreferredProduct.product_url == product_url,
-            )
-            .first()
+    existing = (
+        db.query(PreferredProduct)
+        .filter(
+            PreferredProduct.grocery_item_id == grocery_item_id,
+            PreferredProduct.product_url == product_url,
         )
+        .first()
+    )
     if not existing:
         existing = (
             db.query(PreferredProduct)
@@ -147,8 +145,7 @@ def add_preferred_product(
             existing.brand = brand
         if image_url:
             existing.image_url = image_url
-        if product_url:
-            existing.product_url = product_url
+        existing.product_url = product_url
         if size:
             existing.size = size
         db.flush()
@@ -220,23 +217,21 @@ def promote_product(db: Session, product_id: int) -> None:
         db.flush()
 
 
-def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str, product_url: str | None = None, brand: str | None = None, image_url: str | None = None, size: str | None = None) -> PreferredProduct:
+def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str, product_url: str, brand: str | None = None, image_url: str | None = None, size: str | None = None) -> PreferredProduct:
     """
     Make a product the #1 choice for a grocery item.
     If it already exists, move it to rank 1. Otherwise, add it at rank 1.
     Used when the user corrects a proposal during order review.
     """
     # Match by URL first, then by name
-    existing = None
-    if product_url:
-        existing = (
-            db.query(PreferredProduct)
-            .filter(
-                PreferredProduct.grocery_item_id == grocery_item_id,
-                PreferredProduct.product_url == product_url,
-            )
-            .first()
+    existing = (
+        db.query(PreferredProduct)
+        .filter(
+            PreferredProduct.grocery_item_id == grocery_item_id,
+            PreferredProduct.product_url == product_url,
         )
+        .first()
+    )
     if not existing:
         existing = (
             db.query(PreferredProduct)
@@ -254,8 +249,7 @@ def make_product_top_choice(db: Session, grocery_item_id: int, product_name: str
             existing.image_url = image_url
         if brand:
             existing.brand = brand
-        if product_url:
-            existing.product_url = product_url
+        existing.product_url = product_url
         if size:
             existing.size = size
         if existing.rank == 1:

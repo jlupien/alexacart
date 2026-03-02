@@ -378,11 +378,9 @@ async def _search_single_item(
             async def _fetch_pref(pref):
                 """Fetch current details for a single preferred product."""
                 try:
-                    if pref.product_url:
-                        result = await client.get_product_details(pref.product_url)
-                    else:
-                        results = await client.search_products(pref.product_name, limit=1)
-                        result = results[0] if results else None
+                    if not pref.product_url:
+                        return None
+                    result = await client.get_product_details(pref.product_url)
                     if result:
                         if result.in_stock:
                             pref.last_seen_in_stock = datetime.now(UTC)
@@ -852,7 +850,7 @@ async def _commit_single_item(
         )
         db.add(log_entry)
 
-        if added:
+        if added and product_url:
             image_url = data.get("image_url") or (proposal.image_url if proposal else None)
             size = data.get("size") or (proposal.size if proposal else None)
             _learn_from_result(
@@ -860,7 +858,7 @@ async def _commit_single_item(
                 alexa_text=alexa_text,
                 grocery_item_id=int(grocery_item_id) if grocery_item_id else None,
                 final_product=product_name,
-                product_url=product_url or None,
+                product_url=product_url,
                 brand=data.get("brand"),
                 image_url=image_url,
                 size=size or None,

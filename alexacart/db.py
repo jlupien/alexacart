@@ -18,6 +18,7 @@ def init_db() -> None:
     Base.metadata.create_all(engine)
     _migrate_order_log()
     _migrate_preferred_products()
+    _cleanup_urlless_preferences()
 
 
 def _migrate_order_log() -> None:
@@ -42,6 +43,46 @@ def _migrate_preferred_products() -> None:
         if "size" not in columns:
             logger.info("Migrating preferred_products: adding 'size' column")
             conn.execute(text("ALTER TABLE preferred_products ADD COLUMN size TEXT"))
+
+
+def _cleanup_urlless_preferences() -> None:
+    """Delete preferred products with no URL and re-compact ranks."""
+    with Session(engine) as db:
+        from alexacart.models import PreferredProduct
+
+        urlless = (
+            db.query(PreferredProduct)
+            .filter(
+                (PreferredProduct.product_url.is_(None))
+                | (PreferredProduct.product_url == "")
+            )
+            .all()
+        )
+        if not urlless:
+            return
+
+        affected_item_ids = {p.grocery_item_id for p in urlless}
+        for p in urlless:
+            db.delete(p)
+        db.flush()
+
+        # Re-compact ranks for affected grocery items
+        for item_id in affected_item_ids:
+            remaining = (
+                db.query(PreferredProduct)
+                .filter(PreferredProduct.grocery_item_id == item_id)
+                .order_by(PreferredProduct.rank)
+                .all()
+            )
+            for i, p in enumerate(remaining, 1):
+                p.rank = i
+
+        db.commit()
+        logger.info(
+            "Cleaned up %d URL-less preferred products for %d grocery items",
+            len(urlless),
+            len(affected_item_ids),
+        )
 
 
 def get_db() -> Session:

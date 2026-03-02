@@ -424,6 +424,49 @@ async def _wait_for_oauth_redirect(
     return None
 
 
+async def _retry_oauth_for_device_registration(page, _status) -> dict | None:
+    """
+    Retry the OAuth flow to capture an authorization code for device registration.
+
+    Called when the initial login succeeded but the auth code wasn't captured
+    (e.g. 2FA or security checks caused Amazon to drop the OAuth2 extension
+    parameters from the redirect). Since the user is now freshly authenticated,
+    the second OAuth attempt should auto-redirect instantly with the auth code.
+
+    Returns cookie data dict with registration info, or None if retry didn't work.
+    """
+    logger.info("Retrying OAuth for device registration...")
+    _status("Retrying OAuth for device registration...")
+
+    code_verifier, code_challenge, device_serial = _generate_pkce()
+    oauth_url = _build_oauth_url(code_challenge, device_serial)
+
+    captured_codes = await _setup_auth_code_interceptor(page)
+    await page.get(oauth_url)
+    await page.sleep(4)
+
+    # Check interceptor first, then page URL
+    auth_code = None
+    if captured_codes:
+        auth_code = captured_codes[0]
+        logger.info("OAuth retry captured auth code via interceptor")
+    else:
+        auth_code = await _try_extract_auth_code(page)
+        if auth_code:
+            logger.info("OAuth retry captured auth code from page URL")
+
+    if auth_code:
+        result = await _register_device(auth_code, code_verifier, device_serial)
+        if result:
+            _status("Device registered — refresh token saved")
+            return result
+        logger.warning("OAuth retry: device registration failed despite capturing auth code")
+    else:
+        logger.info("OAuth retry: no auth code captured, falling back to cookie extraction")
+
+    return None
+
+
 async def _check_amazon_login(page) -> bool:
     """Check if the current Amazon page shows a logged-in state."""
     try:
@@ -590,6 +633,11 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
                     _status("Device registered — refresh token saved")
                     return result
                 logger.warning("Device registration failed after re-login, falling back to cookie extraction")
+            else:
+                # Retry OAuth — user just re-logged in, second attempt should auto-redirect with auth code
+                retry_result = await _retry_oauth_for_device_registration(page, _status)
+                if retry_result:
+                    return retry_result
 
             # Fallback: wait for login on amazon.com and extract cookies directly
             page = await browser.get("https://www.amazon.com")
@@ -652,6 +700,10 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
                 logger.warning("Device registration failed, falling back to cookie extraction")
             else:
                 logger.info("On maplanding but no auth code (URL: %s)", page_url)
+                # Retry OAuth — user is authenticated, second attempt should auto-redirect with auth code
+                retry_result = await _retry_oauth_for_device_registration(page, _status)
+                if retry_result:
+                    return retry_result
             _status("Already logged into Amazon")
             page = await browser.get("https://www.amazon.com")
             await page.sleep(2)
@@ -691,6 +743,11 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
                 _status("Device registered — refresh token saved")
                 return result
             logger.warning("Device registration failed after login, falling back to cookie extraction")
+        else:
+            # Retry OAuth — user just logged in, second attempt should auto-redirect with auth code
+            retry_result = await _retry_oauth_for_device_registration(page, _status)
+            if retry_result:
+                return retry_result
 
         # Fallback: check if we're logged in and just extract cookies
         page = await browser.get("https://www.amazon.com")

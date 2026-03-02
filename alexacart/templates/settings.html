@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+
+{% block title %}AlexaCart - Settings{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Settings</h1>
+    <p>Session status and configuration</p>
+</div>
+
+<div class="settings-grid">
+    <!-- Amazon Card -->
+    <div class="card">
+        <h2>Amazon (Alexa)</h2>
+        <table class="settings-table">
+            <tr>
+                <td class="settings-label">Status</td>
+                <td>
+                    {% if amazon.logged_in %}
+                        <span class="badge badge-matched">Logged in</span>
+                    {% else %}
+                        <span class="badge badge-error">Not logged in</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% if amazon.logged_in %}
+            <tr>
+                <td class="settings-label">Cookies</td>
+                <td>{{ amazon.cookie_count }}</td>
+            </tr>
+            <tr>
+                <td class="settings-label">Source</td>
+                <td>{{ amazon.source }}</td>
+            </tr>
+            <tr>
+                <td class="settings-label">Refresh token</td>
+                <td>
+                    {% if amazon.has_refresh_token %}
+                        <span class="badge badge-matched">Yes</span>
+                    {% else %}
+                        <span class="badge badge-substituted">No</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% if amazon.registered_at %}
+            <tr>
+                <td class="settings-label">Registered</td>
+                <td>{{ amazon.registered_at }}</td>
+            </tr>
+            {% endif %}
+            {% if amazon.device_serial %}
+            <tr>
+                <td class="settings-label">Device serial</td>
+                <td><code>{{ amazon.device_serial }}</code></td>
+            </tr>
+            {% endif %}
+            {% endif %}
+            <tr>
+                <td class="settings-label">API check</td>
+                <td id="amazon-check">
+                    <button
+                        class="btn btn-sm btn-outline"
+                        hx-post="/settings/check-amazon"
+                        hx-target="#amazon-check"
+                        hx-indicator="#amazon-check-spinner"
+                    >
+                        Check Now
+                    </button>
+                    <span id="amazon-check-spinner" class="htmx-indicator">Checking...</span>
+                </td>
+            </tr>
+        </table>
+        <div class="settings-actions">
+            <button
+                class="btn btn-sm btn-secondary"
+                hx-post="/settings/logout-amazon"
+                hx-target="#amazon-logout-status"
+                hx-confirm="Clear Amazon login? You'll need to log in again on the next order."
+            >
+                Re-login to Amazon
+            </button>
+            <div id="amazon-logout-status"></div>
+        </div>
+    </div>
+
+    <!-- Instacart Card -->
+    <div class="card">
+        <h2>Instacart</h2>
+        <table class="settings-table">
+            <tr>
+                <td class="settings-label">Status</td>
+                <td>
+                    {% if instacart.logged_in %}
+                        <span class="badge badge-matched">Logged in</span>
+                    {% else %}
+                        <span class="badge badge-error">Not logged in</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% if instacart.logged_in %}
+            <tr>
+                <td class="settings-label">Cookies</td>
+                <td>{{ instacart.cookie_count }}</td>
+            </tr>
+            {% if instacart.extracted_at %}
+            <tr>
+                <td class="settings-label">Extracted</td>
+                <td>{{ instacart.extracted_at }}</td>
+            </tr>
+            {% endif %}
+            {% if instacart.store_slug %}
+            <tr>
+                <td class="settings-label">Store</td>
+                <td>{{ instacart.store_slug }}</td>
+            </tr>
+            {% endif %}
+            {% if instacart.postal_code %}
+            <tr>
+                <td class="settings-label">Postal code</td>
+                <td>{{ instacart.postal_code }}</td>
+            </tr>
+            {% endif %}
+            <tr>
+                <td class="settings-label">Session params</td>
+                <td>
+                    {% if instacart.has_shop_id %}<span class="badge badge-matched">shopId</span> {% endif %}
+                    {% if instacart.has_zone_id %}<span class="badge badge-matched">zoneId</span> {% endif %}
+                    {% if instacart.has_inventory_token %}<span class="badge badge-matched">inventoryToken</span> {% endif %}
+                    {% if instacart.has_location_id %}<span class="badge badge-matched">locationId</span> {% endif %}
+                    {% if not instacart.has_shop_id and not instacart.has_zone_id %}
+                        <span class="badge badge-error">Missing</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% if instacart.cart_id %}
+            <tr>
+                <td class="settings-label">Cart ID</td>
+                <td><code>{{ instacart.cart_id }}</code></td>
+            </tr>
+            {% endif %}
+            {% endif %}
+        </table>
+        <div class="settings-actions">
+            <button
+                class="btn btn-sm btn-secondary"
+                hx-post="/settings/logout-instacart"
+                hx-target="#instacart-logout-status"
+                hx-confirm="Clear Instacart login? You'll need to log in again on the next order."
+            >
+                Re-login to Instacart
+            </button>
+            <div id="instacart-logout-status"></div>
+        </div>
+    </div>
+</div>
+
+<!-- System Info Card -->
+<div class="card">
+    <h2>System Info</h2>
+    <table class="settings-table">
+        <tr>
+            <td class="settings-label">Instacart store</td>
+            <td>{{ config.instacart_store }}</td>
+        </tr>
+        <tr>
+            <td class="settings-label">Alexa list</td>
+            <td>{{ config.alexa_list_name }}</td>
+        </tr>
+        <tr>
+            <td class="settings-label">Data directory</td>
+            <td><code>{{ config.data_dir }}</code></td>
+        </tr>
+        {% if config.local_data_dir != config.data_dir %}
+        <tr>
+            <td class="settings-label">Local data directory</td>
+            <td><code>{{ config.local_data_dir }}</code></td>
+        </tr>
+        {% endif %}
+        <tr>
+            <td class="settings-label">Grocery items</td>
+            <td>{{ db_stats.grocery_items }}</td>
+        </tr>
+        <tr>
+            <td class="settings-label">Aliases</td>
+            <td>{{ db_stats.aliases }}</td>
+        </tr>
+        <tr>
+            <td class="settings-label">Preferred products</td>
+            <td>{{ db_stats.preferred_products }}</td>
+        </tr>
+        <tr>
+            <td class="settings-label">Order log entries</td>
+            <td>{{ db_stats.order_log }}</td>
+        </tr>
+    </table>
+</div>
+{% endblock %}

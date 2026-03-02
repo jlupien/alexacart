@@ -583,9 +583,14 @@ async def extract_session_via_nodriver(on_status=None, force_relogin=False) -> d
 
     if force_relogin:
         _status("Force re-login — opening Instacart login window...")
+        login_url = f"{INSTACART_BASE}/login"
         for attempt in range(3):
             try:
-                browser = await uc.start(user_data_dir=str(profile_dir), headless=False)
+                browser = await uc.start(
+                    user_data_dir=str(profile_dir),
+                    headless=False,
+                    browser_args=[login_url],
+                )
                 break
             except Exception as e:
                 if attempt < 2:
@@ -632,9 +637,14 @@ async def extract_session_via_nodriver(on_status=None, force_relogin=False) -> d
                 await asyncio.sleep(1)
                 _status("Login needed — opening Instacart login window...")
 
+                login_url = f"{INSTACART_BASE}/login"
                 for attempt in range(3):
                     try:
-                        browser = await uc.start(user_data_dir=str(profile_dir), headless=False)
+                        browser = await uc.start(
+                            user_data_dir=str(profile_dir),
+                            headless=False,
+                            browser_args=[login_url],
+                        )
                         break
                     except Exception as e:
                         if attempt < 2:
@@ -643,7 +653,7 @@ async def extract_session_via_nodriver(on_status=None, force_relogin=False) -> d
                         else:
                             raise
 
-            page = await browser.get(f"{INSTACART_BASE}/login")
+            page = browser.main_tab
             await page.sleep(2)
 
             _status("Waiting for Instacart login — please log in via the browser window...")

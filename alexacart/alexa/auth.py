@@ -569,9 +569,19 @@ def _clean_profile_locks(profile_dir: Path) -> bool:
     return cleaned
 
 
-async def _start_browser(profile_dir: Path, headless: bool = True):
-    """Start nodriver with retry and zombie Chrome cleanup."""
+async def _start_browser(
+    profile_dir: Path, headless: bool = True, start_url: str | None = None
+):
+    """Start nodriver with retry and zombie Chrome cleanup.
+
+    Args:
+        start_url: URL to open when Chrome launches. Passed as a Chrome
+            command-line argument so the page starts loading immediately
+            (no blank window). Only used for visible browsers.
+    """
     import nodriver as uc
+
+    extra_args = [start_url] if start_url and not headless else []
 
     for attempt in range(3):
         killed = _kill_chrome_for_profile(profile_dir)
@@ -584,6 +594,7 @@ async def _start_browser(profile_dir: Path, headless: bool = True):
             browser = await uc.start(
                 user_data_dir=str(profile_dir),
                 headless=headless,
+                browser_args=extra_args,
             )
             return browser
         except Exception as e:
@@ -649,10 +660,13 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
     if force_relogin:
         # Skip headless check — open visible browser and force a fresh login
         _status("Session expired — opening Amazon for re-login...")
-        browser = await _start_browser(profile_dir, headless=False)
+        browser = await _start_browser(
+            profile_dir, headless=False,
+            start_url="https://www.amazon.com/gp/flex/sign-out.html",
+        )
         try:
             # Sign out first to clear the stale session
-            page = await browser.get("https://www.amazon.com/gp/flex/sign-out.html")
+            page = browser.main_tab
             await page.sleep(3)
 
             # Set up interceptor BEFORE navigating to OAuth URL so we catch instant redirects
@@ -763,8 +777,8 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         # Generate fresh PKCE to avoid server-side state issues from the headless attempt
         code_verifier, code_challenge, device_serial = _generate_pkce()
         oauth_url = _build_oauth_url(code_challenge, device_serial)
-        browser = await _start_browser(profile_dir, headless=False)
-        page = await browser.get(oauth_url)
+        browser = await _start_browser(profile_dir, headless=False, start_url=oauth_url)
+        page = browser.main_tab
         captured_codes = await _setup_auth_code_interceptor(page)
         await page.sleep(2)
 

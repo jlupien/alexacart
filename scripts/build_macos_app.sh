@@ -95,7 +95,6 @@ LOG_FILE="\$PROJECT_DIR/data/alexacart.log"
 
 export PATH="$UV_DIR:\$PATH"
 export PYTHONUNBUFFERED=1
-export ALEXACART_APP_LAUNCHER=1
 
 # Kill any existing server so we always run the latest code.
 OLD_PIDS=\$(lsof -ti :\$PORT 2>/dev/null) || true

@@ -597,9 +597,7 @@ async def _start_browser(
     from alexacart.nodriver_patch import patch as _patch_nodriver
     _patch_nodriver()
 
-    extra_args = ["--disable-gpu"]
-    if start_url and not headless:
-        extra_args.append(start_url)
+    extra_args = [start_url] if start_url and not headless else []
 
     for attempt in range(3):
         killed = _kill_chrome_for_profile(profile_dir)
@@ -613,7 +611,7 @@ async def _start_browser(
                 user_data_dir=str(profile_dir),
                 headless=headless,
                 browser_args=extra_args,
-                sandbox=False,
+
             )
             return browser
         except Exception as e:

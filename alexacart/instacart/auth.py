@@ -592,8 +592,8 @@ async def extract_session_via_nodriver(on_status=None, force_relogin=False) -> d
                 browser = await uc.start(
                     user_data_dir=str(profile_dir),
                     headless=False,
-                    browser_args=["--disable-gpu", login_url],
-                    sandbox=False,
+                    browser_args=[login_url],
+
                 )
                 break
             except Exception as e:
@@ -609,8 +609,6 @@ async def extract_session_via_nodriver(on_status=None, force_relogin=False) -> d
                 browser = await uc.start(
                     user_data_dir=str(profile_dir),
                     headless=True,
-                    browser_args=["--disable-gpu"],
-                    sandbox=False,
                 )
                 break
             except Exception as e:
@@ -652,8 +650,8 @@ async def extract_session_via_nodriver(on_status=None, force_relogin=False) -> d
                         browser = await uc.start(
                             user_data_dir=str(profile_dir),
                             headless=False,
-                            browser_args=["--disable-gpu", login_url],
-                            sandbox=False,
+                            browser_args=[login_url],
+        
                         )
                         break
                     except Exception as e:

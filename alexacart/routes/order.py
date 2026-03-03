@@ -140,6 +140,22 @@ async def _run_order(session: OrderSession):
 
         on_status = lambda msg: setattr(session, "status_detail", msg)
 
+        # Log cookie state at start for diagnostics
+        from alexacart.alexa.auth import load_cookies as _diag_load
+        _diag = _diag_load()
+        if _diag:
+            _reg = _diag.get("registration", {})
+            logger.info(
+                "ORDER START — Amazon cookie state: source=%s, has_refresh_token=%s, "
+                "registered_at=%s, cookie_count=%d",
+                _diag.get("source", "unknown"),
+                bool(_reg.get("refresh_token")),
+                _reg.get("registered_at", "n/a"),
+                len(_diag.get("cookies", {})),
+            )
+        else:
+            logger.info("ORDER START — No Amazon cookies on disk")
+
         # Try fast token refresh first for Amazon (no browser needed, ~1s)
         token_cookie_data = await refresh_cookies_via_token()
 

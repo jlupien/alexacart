@@ -52,13 +52,24 @@ def load_cookies() -> dict | None:
     """Load saved cookies from disk. Returns dict with 'cookies' key or None."""
     path = _cookies_path()
     if not path.exists():
+        logger.info("load_cookies: no cookies file at %s", path)
         return None
     try:
         data = json.loads(path.read_text())
         if "cookies" in data and data["cookies"]:
+            reg = data.get("registration", {})
+            has_refresh = bool(reg.get("refresh_token"))
+            logger.info(
+                "load_cookies: loaded %d cookies, source=%s, has_refresh_token=%s, registered_at=%s",
+                len(data["cookies"]),
+                data.get("source", "unknown"),
+                has_refresh,
+                reg.get("registered_at", "n/a"),
+            )
             return data
-    except (json.JSONDecodeError, KeyError):
-        pass
+        logger.info("load_cookies: file exists but no cookies in it")
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.warning("load_cookies: failed to parse %s: %s", path, e)
     return None
 
 
@@ -66,8 +77,32 @@ def save_cookies(data: dict) -> None:
     """Save cookies to disk."""
     path = _cookies_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    reg = data.get("registration", {})
+    has_refresh = bool(reg.get("refresh_token"))
+    logger.info(
+        "save_cookies: saving %d cookies, source=%s, has_refresh_token=%s, registered_at=%s → %s",
+        len(data.get("cookies", {})),
+        data.get("source", "unknown"),
+        has_refresh,
+        reg.get("registered_at", "n/a"),
+        path,
+    )
+    if not has_refresh:
+        # Check if we're about to overwrite a file that HAD a refresh token
+        existing = None
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text())
+            except Exception:
+                pass
+        if existing and existing.get("registration", {}).get("refresh_token"):
+            logger.warning(
+                "save_cookies: ⚠️  OVERWRITING existing refresh token! "
+                "Old source=%s, new source=%s. This will lose the refresh token.",
+                existing.get("source", "unknown"),
+                data.get("source", "unknown"),
+            )
     path.write_text(json.dumps(data, indent=2))
-    logger.info("Cookies saved to %s", path)
 
 
 def get_cookie_header(data: dict) -> dict[str, str]:
@@ -184,15 +219,34 @@ async def _register_device(
                 return None
 
             data = resp.json()
+            # Log the top-level structure to diagnose registration issues
+            response_keys = list(data.get("response", {}).keys())
+            logger.info("Device registration response keys: %s", response_keys)
+            if "error" in data.get("response", {}):
+                logger.warning(
+                    "Device registration error in response: %s",
+                    json.dumps(data["response"]["error"], indent=2)[:1000],
+                )
             response_data = data.get("response", {}).get("success", {})
             tokens = response_data.get("tokens", {})
+            token_types = list(tokens.keys())
             bearer = tokens.get("bearer", {})
+            bearer_keys = list(bearer.keys())
+            logger.info(
+                "Device registration tokens: types=%s, bearer_keys=%s",
+                token_types, bearer_keys,
+            )
 
             refresh_token = bearer.get("refresh_token")
             access_token = bearer.get("access_token")
 
             if not refresh_token:
-                logger.warning("Device registration response missing refresh_token")
+                logger.warning(
+                    "Device registration response missing refresh_token. "
+                    "bearer keys: %s, full bearer (truncated): %s",
+                    bearer_keys,
+                    str({k: v[:20] + "..." if isinstance(v, str) and len(v) > 20 else v for k, v in bearer.items()})[:500],
+                )
                 return None
 
             # Extract website cookies from registration response
@@ -240,9 +294,19 @@ async def refresh_cookies_via_token() -> dict | None:
     registration = existing.get("registration", {})
     refresh_token = registration.get("refresh_token")
     if not refresh_token:
-        logger.info("No refresh token in cookies file — token refresh unavailable")
+        logger.info(
+            "No refresh token in cookies file — token refresh unavailable. "
+            "source=%s, registration_keys=%s",
+            existing.get("source", "unknown"),
+            list(registration.keys()),
+        )
         return None
 
+    logger.info(
+        "Attempting token refresh (registered_at=%s, refresh_token=%s...)",
+        registration.get("registered_at", "n/a"),
+        refresh_token[:20] if refresh_token else "None",
+    )
     device_serial = registration.get("device_serial", "")
 
     try:
@@ -275,18 +339,29 @@ async def refresh_cookies_via_token() -> dict | None:
 
             if resp.status_code != 200:
                 logger.warning(
-                    "Token-to-cookie exchange failed: %d %s",
+                    "Token-to-cookie exchange failed: HTTP %d — %s",
                     resp.status_code, resp.text[:500],
                 )
                 return None
 
             data = resp.json()
             response = data.get("response", {})
+            response_keys = list(response.keys())
             tokens = response.get("tokens", {})
+            tokens_keys = list(tokens.keys())
+            cookie_domains = list(tokens.get("cookies", {}).keys())
             cookie_list = tokens.get("cookies", {}).get(".amazon.com", [])
+            logger.info(
+                "Token exchange response: response_keys=%s, tokens_keys=%s, "
+                "cookie_domains=%s, .amazon.com_cookies=%d",
+                response_keys, tokens_keys, cookie_domains, len(cookie_list),
+            )
 
             if not cookie_list:
-                logger.warning("Token exchange response has no cookies")
+                logger.warning(
+                    "Token exchange response has no cookies. Full response (truncated): %s",
+                    json.dumps(data, indent=2)[:1000],
+                )
                 return None
 
             cookies = {}
@@ -529,8 +604,22 @@ async def _check_amazon_login(page) -> bool:
 
 
 async def _extract_and_save_cookies(browser, _status) -> dict:
-    """Extract Amazon cookies from a nodriver browser and save to disk."""
+    """Extract Amazon cookies from a nodriver browser and save to disk.
+
+    NOTE: This is a fallback path — saves cookies WITHOUT a refresh token.
+    The save_cookies() call will log a warning if this overwrites an existing
+    refresh token.
+    """
+    import traceback
+
     _status("Extracting Amazon cookies...")
+    logger.info(
+        "_extract_and_save_cookies called (fallback path — no refresh token). "
+        "Caller: %s",
+        " → ".join(
+            f"{f.name}:{f.lineno}" for f in traceback.extract_stack()[-4:-1]
+        ),
+    )
     all_cookies = await browser.cookies.get_all()
     cookies = {}
     for c in all_cookies:
@@ -742,13 +831,20 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
 
         # Check if the OAuth redirected immediately (user already logged in)
         auth_code = captured_codes[0] if captured_codes else await _try_extract_auth_code(page)
+        page_url_now = page.url or ""
+        logger.info(
+            "Headless OAuth check: auth_code=%s, captured_codes=%d, page_url=%s",
+            "yes" if auth_code else "no",
+            len(captured_codes),
+            page_url_now[:200],
+        )
         if auth_code:
             _status("Already logged in — registering device...")
             result = await _register_device(auth_code, code_verifier, device_serial)
             if result:
                 _status("Device registered — refresh token saved")
                 return result
-            logger.warning("Device registration failed, falling back to cookie extraction")
+            logger.warning("Device registration failed (had auth code), falling back to cookie extraction")
             # Fall through to extract cookies directly
             page = await browser.get("https://www.amazon.com")
             await page.sleep(2)

@@ -36,6 +36,19 @@ echo "Found uv at $UV_BIN"
 # ---------------------------------------------------------------------------
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS"
+mkdir -p "$APP_DIR/Contents/Resources"
+
+# ---------------------------------------------------------------------------
+# App icon
+# ---------------------------------------------------------------------------
+ICNS_SRC="$PROJECT_DIR/scripts/AlexaCart.icns"
+if [[ -f "$ICNS_SRC" ]]; then
+    cp "$ICNS_SRC" "$APP_DIR/Contents/Resources/AlexaCart.icns"
+    echo "Included app icon"
+else
+    echo "Warning: $ICNS_SRC not found — app will use default icon"
+    echo "  Run: uv run --with pillow python scripts/generate_icon.py"
+fi
 
 # ---------------------------------------------------------------------------
 # Info.plist
@@ -54,6 +67,8 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
     <string>com.alexacart.launcher</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AlexaCart</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
     <key>LSUIElement</key>
@@ -76,25 +91,48 @@ cat > "$APP_DIR/Contents/MacOS/AlexaCart" << LAUNCHER
 PROJECT_DIR="$PROJECT_DIR"
 PORT=8000
 URL="http://127.0.0.1:\$PORT"
+LOG_FILE="\$PROJECT_DIR/data/alexacart.log"
 
 export PATH="$UV_DIR:\$PATH"
+export PYTHONUNBUFFERED=1
+export ALEXACART_APP_LAUNCHER=1
 
-# If the server is already running, just open the browser and exit.
-if curl -s -o /dev/null -w '' "\$URL" 2>/dev/null; then
-    open "\$URL"
-    exit 0
+# Kill any existing server so we always run the latest code.
+OLD_PIDS=\$(lsof -ti :\$PORT 2>/dev/null) || true
+if [[ -n "\$OLD_PIDS" ]]; then
+    echo "\$OLD_PIDS" | xargs kill 2>/dev/null || true
+    sleep 1
 fi
 
-cd "\$PROJECT_DIR"
+# Kill orphaned Chrome processes from previous sessions.
+for profile in "\$PROJECT_DIR/data/nodriver-amazon" "\$PROJECT_DIR/data/nodriver-instacart"; do
+    pids=\$(pgrep -f "\$profile" 2>/dev/null) || true
+    if [[ -n "\$pids" ]]; then
+        echo "\$pids" | xargs kill -9 2>/dev/null || true
+    fi
+done
 
-# Start the server in the background.
-uv run python run.py &
+cd "\$PROJECT_DIR"
+mkdir -p "\$PROJECT_DIR/data"
+
+# Rotate logs: keep only the previous run.
+[[ -f "\$LOG_FILE" ]] && mv -f "\$LOG_FILE" "\$LOG_FILE.1"
+
+# Start the server, logging stdout+stderr to a file.
+uv run python run.py >"\$LOG_FILE" 2>&1 &
 SERVER_PID=\$!
 
-# Clean up on exit.
+# Clean up on exit: kill server + any Chrome processes nodriver spawned.
 cleanup() {
     kill "\$SERVER_PID" 2>/dev/null
     wait "\$SERVER_PID" 2>/dev/null
+    # Kill lingering nodriver Chrome processes by profile directory.
+    for profile in "\$PROJECT_DIR/data/nodriver-amazon" "\$PROJECT_DIR/data/nodriver-instacart"; do
+        pids=\$(pgrep -f "\$profile" 2>/dev/null) || true
+        if [[ -n "\$pids" ]]; then
+            echo "\$pids" | xargs kill -9 2>/dev/null || true
+        fi
+    done
 }
 trap cleanup SIGTERM SIGINT EXIT
 
@@ -113,8 +151,14 @@ LAUNCHER
 
 chmod +x "$APP_DIR/Contents/MacOS/AlexaCart"
 
+# Remove macOS quarantine flag — without this, Gatekeeper blocks child
+# processes (nodriver/Chrome) from launching when the .app is double-clicked.
+xattr -cr "$APP_DIR" 2>/dev/null || true
+
 echo ""
 echo "Built $APP_DIR"
+echo ""
+echo "Logs: $PROJECT_DIR/data/alexacart.log"
 echo ""
 echo "To add to your Dock:"
 echo "  1. Open Finder and navigate to: $PROJECT_DIR"

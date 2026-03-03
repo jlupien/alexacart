@@ -558,6 +558,9 @@ async def extract_session_via_nodriver(on_status=None, force_relogin=False) -> d
     """
     import nodriver as uc
 
+    from alexacart.nodriver_patch import patch as _patch_nodriver
+    _patch_nodriver()
+
     def _status(msg):
         logger.info(msg)
         if on_status:
@@ -589,7 +592,8 @@ async def extract_session_via_nodriver(on_status=None, force_relogin=False) -> d
                 browser = await uc.start(
                     user_data_dir=str(profile_dir),
                     headless=False,
-                    browser_args=[login_url],
+                    browser_args=["--disable-gpu", login_url],
+                    sandbox=False,
                 )
                 break
             except Exception as e:
@@ -602,7 +606,12 @@ async def extract_session_via_nodriver(on_status=None, force_relogin=False) -> d
     else:
         for attempt in range(3):
             try:
-                browser = await uc.start(user_data_dir=str(profile_dir), headless=True)
+                browser = await uc.start(
+                    user_data_dir=str(profile_dir),
+                    headless=True,
+                    browser_args=["--disable-gpu"],
+                    sandbox=False,
+                )
                 break
             except Exception as e:
                 if attempt < 2:
@@ -643,7 +652,8 @@ async def extract_session_via_nodriver(on_status=None, force_relogin=False) -> d
                         browser = await uc.start(
                             user_data_dir=str(profile_dir),
                             headless=False,
-                            browser_args=[login_url],
+                            browser_args=["--disable-gpu", login_url],
+                            sandbox=False,
                         )
                         break
                     except Exception as e:

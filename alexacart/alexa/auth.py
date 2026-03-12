@@ -40,6 +40,19 @@ OS_VERSION = "18.3.1"
 SOFTWARE_VERSION = "1"
 
 
+async def _get_amazon_browser_cookies(browser) -> list:
+    """Extract all Amazon cookies from a nodriver browser session.
+
+    Returns a list of nodriver cookie objects (each has .name and .value attributes).
+    These are passed to _register_device to populate the registration body.
+    """
+    all_cookies = await browser.cookies.get_all()
+    return [
+        c for c in all_cookies
+        if "amazon" in (getattr(c, "domain", "") or "")
+    ]
+
+
 def _is_on_maplanding(url: str) -> bool:
     """Check if URL path is the OAuth maplanding redirect (not just a query param match)."""
     from urllib.parse import urlparse
@@ -129,22 +142,25 @@ def _generate_pkce() -> tuple[str, str, str]:
 def _build_oauth_url(
     code_challenge: str,
     device_serial: str,
-    force_fresh_auth: bool = True,
     immediate: bool = False,
 ) -> str:
     """Build the Amazon OAuth URL that the Alexa app uses to initiate login.
 
     Args:
-        force_fresh_auth: If True, include PAPE max_auth_age=0 which forces
-            Amazon to require fresh authentication (ignore existing sessions).
         immediate: If True, use checkid_immediate mode which forces Amazon to
             respond instantly (no login form). Used for retry after login — the
             user is already authenticated so Amazon should auto-complete with
             the full OAuth2 assertion including the authorization code.
+
+    client_id encoding: working implementations (Apollon77/alexa-cookie, mkb79/Audible)
+    hex-encode the ASCII bytes of "UPPER_SERIAL#DEVICE_TYPE". Sending the plain string
+    causes Amazon to silently ignore the OAuth2 extension and return only OpenID auth.
     """
     from urllib.parse import urlencode
 
-    client_id = f"{device_serial}#{DEVICE_TYPE}"
+    # Double-encode: hex of ASCII bytes of "SERIAL_UPPER#DEVICE_TYPE"
+    client_id_hex = f"{device_serial.upper()}#{DEVICE_TYPE}".encode("ascii").hex()
+
     params = {
         "openid.oa2.response_type": "code",
         "openid.oa2.code_challenge_method": "S256",
@@ -155,38 +171,108 @@ def _build_oauth_url(
         "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier_select",
         "openid.mode": "checkid_immediate" if immediate else "checkid_setup",
         "openid.ns.oa2": "http://www.amazon.com/ap/ext/oauth/2",
-        "openid.oa2.client_id": f"device:{client_id}",
+        "openid.oa2.client_id": f"device:{client_id_hex}",
         "openid.oa2.scope": "device_auth_access",
         "openid.ns": "http://specs.openid.net/auth/2.0",
-        # serial is required — Amazon echoes it back in the maplanding redirect and
-        # uses it to include openid.oa2.authorization_code in the response.
-        # Without it, Amazon completes OpenID auth but skips the OAuth2 extension.
-        "serial": device_serial,
+        # PAPE max_auth_age=0 required by working implementations — forces Amazon
+        # to run the full OAuth2 device registration flow rather than fast-tracking
+        # via an existing session (which returns only OpenID auth, no auth code).
+        "openid.ns.pape": "http://specs.openid.net/extensions/pape/1.0",
+        "openid.pape.max_auth_age": "0",
+        "pageId": "amzn_dp_project_dee_ios",
+        "accountStatusPolicy": "P1",
+        "language": "en-US",
     }
-    if force_fresh_auth:
-        params["openid.ns.pape"] = "http://specs.openid.net/extensions/pape/1.0"
-        params["openid.pape.max_auth_age"] = "0"
     return f"https://www.amazon.com/ap/signin?{urlencode(params)}"
 
 
+def _generate_frc() -> str:
+    """Generate a device fingerprint cookie (First Run Cookie).
+
+    Amazon sets this on first browser visit via set-cookie headers. In our
+    headless flow, Amazon never sets it, so we generate a random one. Format
+    matches what Amazon's client SDK would generate: 313 random bytes, base64.
+    """
+    return base64.b64encode(secrets.token_bytes(313)).decode().rstrip("=")
+
+
 async def _register_device(
-    authorization_code: str, code_verifier: str, device_serial: str
+    authorization_code: str, code_verifier: str, device_serial: str,
+    browser_cookies: list | None = None,
 ) -> dict | None:
     """
     Register a virtual Alexa device with Amazon to obtain a long-lived refresh token.
 
     This mimics what the Alexa mobile app does after the user logs in via OAuth.
     The refresh token can later be exchanged for fresh cookies without a browser.
+
+    browser_cookies: list of nodriver cookie objects from the Amazon login session.
+        Amazon expects these as website_cookies in the registration body, and uses
+        the frc cookie value as a device fingerprint (user_context_map.frc).
     """
-    client_id = f"{device_serial}#{DEVICE_TYPE}"
+    # The registration body client_id is the raw hex string WITHOUT "device:" prefix.
+    # "device:" is only added in the OAuth URL parameter (openid.oa2.client_id).
+    # Amazon strips "device:" when storing the auth code and validates against the
+    # raw hex — sending "device:{hex}" here causes a 400 InvalidValue.
+    # Reference: Apollon77/alexa-cookie proxy.js, mkb79/Audible login.py
+    client_id = f"{device_serial.upper()}#{DEVICE_TYPE}".encode("ascii").hex()
+
+    # Build website_cookies from browser session and extract frc
+    website_cookies = []
+    frc = ""
+    for c in (browser_cookies or []):
+        name = getattr(c, "name", None) or ""
+        value = getattr(c, "value", None) or ""
+        if name and value:
+            website_cookies.append({"Name": name, "Value": value})
+            if name == "frc":
+                frc = value
+
+    frc_source = "browser"
+    if not frc:
+        # Don't generate a random frc — Amazon validates user_context_map.frc against
+        # what it saw in the Cookie header during login. Since we don't inject frc as a
+        # cookie before the OAuth flow (unlike the Apollon77 proxy approach), Amazon
+        # never saw any frc. Sending a generated value causes 400 InvalidValue.
+        # Instead, omit user_context_map entirely — Audible's Python implementation
+        # does the same and works fine.
+        frc_source = "absent"
+
+    logger.info(
+        "Device registration: website_cookies=%d, frc=%s",
+        len(website_cookies),
+        frc_source,
+    )
+    logger.info(
+        "Device registration inputs: "
+        "auth_code=%s... (len=%d), "
+        "code_verifier=%s... (len=%d), "
+        "device_serial=%s, "
+        "client_id=%s... (len=%d)",
+        authorization_code[:20] if authorization_code else "NONE",
+        len(authorization_code) if authorization_code else 0,
+        code_verifier[:20] if code_verifier else "NONE",
+        len(code_verifier) if code_verifier else 0,
+        device_serial,
+        client_id[:30],
+        len(client_id),
+    )
+    logger.info(
+        "Device registration website_cookie_names: %s",
+        [c["Name"] for c in website_cookies],
+    )
+
+    # Cookie header for the registration request — use actual browser cookies
+    cookie_header = "; ".join(f"{c['Name']}={c['Value']}" for c in website_cookies) if website_cookies else ""
+
     body = {
         "requested_extensions": ["device_info", "customer_info"],
-        "cookies": {"website_cookies": [], "domain": ".amazon.com"},
+        "cookies": {"website_cookies": website_cookies, "domain": ".amazon.com"},
         "registration_data": {
             "domain": "Device",
             "app_version": APP_VERSION,
             "device_type": DEVICE_TYPE,
-            "device_name": f"%FIRST_NAME%'s%DUPE_STRATEGY_1ST%Alexa App",
+            "device_name": "%FIRST_NAME%\u0027s%DUPE_STRATEGY_1ST%Alexa App",
             "os_version": OS_VERSION,
             "device_serial": device_serial,
             "device_model": "iPhone",
@@ -199,15 +285,34 @@ async def _register_device(
             "code_verifier": code_verifier,
             "code_algorithm": "SHA-256",
             "client_domain": "DeviceLegacy",
-            "use_global_authentication": "true",
         },
-        "user_context_map": {"frc": ""},
+        # Only include user_context_map if frc came from the browser — Amazon
+        # validates it against the frc it saw in Cookie headers during login.
+        # Omitting it entirely (like mkb79/Audible) is safe when we have no real frc.
+        **( {"user_context_map": {"frc": frc}} if frc_source == "browser" else {} ),
         "requested_token_type": [
             "bearer",
             "mac_dms",
             "website_cookies",
         ],
     }
+
+    # Log sanitized body for debugging
+    sanitized_body = json.loads(json.dumps(body))
+    if "auth_data" in sanitized_body:
+        ad = sanitized_body["auth_data"]
+        if "authorization_code" in ad:
+            ad["authorization_code"] = ad["authorization_code"][:20] + "...[TRUNCATED]"
+        if "code_verifier" in ad:
+            ad["code_verifier"] = ad["code_verifier"][:20] + "...[TRUNCATED]"
+    if "cookies" in sanitized_body and "website_cookies" in sanitized_body["cookies"]:
+        sanitized_body["cookies"]["website_cookies"] = [
+            {"Name": c["Name"], "Value": c["Value"][:10] + "...[TRUNC]"}
+            for c in sanitized_body["cookies"]["website_cookies"]
+        ]
+    if "user_context_map" in sanitized_body and "frc" in sanitized_body["user_context_map"]:
+        sanitized_body["user_context_map"]["frc"] = sanitized_body["user_context_map"]["frc"][:20] + f"...[len={len(frc)}]"
+    logger.info("Device registration body (sanitized):\n%s", json.dumps(sanitized_body, indent=2))
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -216,7 +321,13 @@ async def _register_device(
                 json=body,
                 headers={
                     "Content-Type": "application/json",
+                    "Accept": "application/json",
                     "Accept-Language": "en-US",
+                    "Accept-Charset": "utf-8",
+                    "Connection": "keep-alive",
+                    "User-Agent": f"AmazonWebView/{APP_NAME}/{APP_VERSION}/iOS/{OS_VERSION}/iPhone",
+                    "x-amzn-identity-auth-domain": "api.amazon.com",
+                    "Cookie": cookie_header,
                 },
             )
             if resp.status_code != 200:
@@ -577,7 +688,7 @@ async def _retry_oauth_for_device_registration(browser, _status) -> dict | None:
     page = browser.main_tab
 
     code_verifier, code_challenge, device_serial = _generate_pkce()
-    oauth_url = _build_oauth_url(code_challenge, device_serial, force_fresh_auth=False)
+    oauth_url = _build_oauth_url(code_challenge, device_serial)
 
     # Set up interceptor BEFORE navigation so we catch the immediate redirect
     captured_codes = await _setup_auth_code_interceptor(page)
@@ -602,7 +713,8 @@ async def _retry_oauth_for_device_registration(browser, _status) -> dict | None:
 
     if auth_code:
         logger.info("OAuth retry: captured auth code via page navigation")
-        reg_result = await _register_device(auth_code, code_verifier, device_serial)
+        browser_cookies = await _get_amazon_browser_cookies(browser)
+        reg_result = await _register_device(auth_code, code_verifier, device_serial, browser_cookies=browser_cookies)
         if reg_result:
             _status("Device registered — refresh token saved")
             return reg_result
@@ -692,6 +804,31 @@ def _clean_profile_locks(profile_dir: Path) -> bool:
             except OSError as e:
                 logger.debug("Could not remove %s: %s", lock_name, e)
     return cleaned
+
+
+def _clear_amazon_session_cookies(profile_dir: Path) -> None:
+    """Delete Chrome's cookie DB files from the Amazon nodriver profile.
+
+    Removes existing Amazon session cookies so Amazon can't fast-track the
+    OAuth flow. Without this, Amazon recognises the existing session and returns
+    only an OpenID assertion — skipping the OAuth2 extension and never including
+    openid.oa2.authorization_code in the maplanding redirect.
+
+    Must be called BEFORE starting Chrome (can't delete a locked DB).
+    """
+    for rel in (
+        "Default/Cookies",
+        "Default/Cookies-journal",
+        "Default/Network/Cookies",
+        "Default/Network/Cookies-journal",
+    ):
+        p = profile_dir / rel
+        if p.exists():
+            try:
+                p.unlink()
+                logger.info("Cleared Chrome cookie DB for fresh OAuth: %s", rel)
+            except OSError as e:
+                logger.debug("Could not clear %s: %s", rel, e)
 
 
 def _stop_browser(browser, profile_dir: Path) -> None:
@@ -804,34 +941,28 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
             logger.info("Cleared session storage: %s", session_dir)
 
     # Generate PKCE + OAuth URL for device registration.
-    # force_fresh_auth=False omits max_auth_age=0, which avoids forcing 2FA.
-    # When 2FA is triggered, Amazon drops the OAuth2 extension (authorization_code)
-    # from the redirect. Without max_auth_age=0, warm Chrome profiles can
-    # auto-redirect with the auth code intact.
     code_verifier, code_challenge, device_serial = _generate_pkce()
-    oauth_url = _build_oauth_url(code_challenge, device_serial, force_fresh_auth=False)
+    oauth_url = _build_oauth_url(code_challenge, device_serial)
 
     if force_relogin:
-        # Skip headless check — open visible browser and force a fresh login
+        # Skip headless check — open visible browser and force a fresh login.
+        # Clear cookies first so Amazon can't fast-track the OAuth flow.
+        _clear_amazon_session_cookies(profile_dir)
         _status("Session expired — opening Amazon for re-login...")
-        browser = await _start_browser(
-            profile_dir, headless=False,
-            start_url="https://www.amazon.com/gp/flex/sign-out.html",
-        )
+        browser = await _start_browser(profile_dir, headless=False)
         try:
-            # Sign out first to clear the stale session
             page = browser.main_tab
-            await page.sleep(3)
 
-            # Set up interceptor BEFORE navigating to OAuth URL so we catch instant redirects
+            # Set up interceptor to catch auth code from the OAuth redirect
             _status("Please log into Amazon in the browser window...")
             captured_codes = await _setup_auth_code_interceptor(page)
             await page.get(oauth_url)
-            await page.sleep(2)
+            await page.sleep(1)
 
             auth_code, login_seen = await _wait_for_oauth_redirect(page, captured_codes=captured_codes)
             if auth_code:
-                result = await _register_device(auth_code, code_verifier, device_serial)
+                browser_cookies = await _get_amazon_browser_cookies(browser)
+                result = await _register_device(auth_code, code_verifier, device_serial, browser_cookies=browser_cookies)
                 if result:
                     _status("Device registered — refresh token saved")
                     return result
@@ -853,7 +984,7 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
     browser = await _start_browser(profile_dir, headless=True)
 
     try:
-        # Set up interceptor BEFORE navigating to OAuth URL so we catch instant redirects
+        # Set up interceptor BEFORE navigating to OAuth URL
         page = await browser.get("about:blank")
         captured_codes = await _setup_auth_code_interceptor(page)
         await page.get(oauth_url)
@@ -885,7 +1016,8 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         )
         if auth_code:
             _status("Already logged in — registering device...")
-            result = await _register_device(auth_code, code_verifier, device_serial)
+            browser_cookies = await _get_amazon_browser_cookies(browser)
+            result = await _register_device(auth_code, code_verifier, device_serial, browser_cookies=browser_cookies)
             if result:
                 _status("Device registered — refresh token saved")
                 return result
@@ -904,7 +1036,8 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
                 auth_code = captured_codes[0]
                 logger.info("Captured OAuth auth code via interceptor on maplanding")
                 _status("Already logged in — registering device...")
-                result = await _register_device(auth_code, code_verifier, device_serial)
+                browser_cookies = await _get_amazon_browser_cookies(browser)
+                result = await _register_device(auth_code, code_verifier, device_serial, browser_cookies=browser_cookies)
                 if result:
                     _status("Device registered — refresh token saved")
                     return result
@@ -936,18 +1069,26 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         _stop_browser(browser, profile_dir)
         await asyncio.sleep(2)
         _status("Login needed — opening Amazon login window...")
+        # Clear Chrome session cookies BEFORE starting the visible browser.
+        # If the profile has existing Amazon session cookies, Amazon fast-tracks the
+        # OpenID auth without running the OAuth2 device registration flow — returning
+        # only openid.mode=id_res with no openid.oa2.authorization_code.
+        # A fresh cookie context forces Amazon to run the full login + device reg flow.
+        _clear_amazon_session_cookies(profile_dir)
         # Generate fresh PKCE to avoid server-side state issues from the headless attempt
         code_verifier, code_challenge, device_serial = _generate_pkce()
-        oauth_url = _build_oauth_url(code_challenge, device_serial, force_fresh_auth=False)
-        browser = await _start_browser(profile_dir, headless=False, start_url=oauth_url)
+        oauth_url = _build_oauth_url(code_challenge, device_serial)
+        browser = await _start_browser(profile_dir, headless=False)
         page = browser.main_tab
         captured_codes = await _setup_auth_code_interceptor(page)
-        await page.sleep(2)
+        await page.get(oauth_url)
+        await page.sleep(1)
 
         _status("Waiting for Amazon login — please log in via the browser window...")
         auth_code, login_seen = await _wait_for_oauth_redirect(page, captured_codes=captured_codes)
         if auth_code:
-            result = await _register_device(auth_code, code_verifier, device_serial)
+            browser_cookies = await _get_amazon_browser_cookies(browser)
+            result = await _register_device(auth_code, code_verifier, device_serial, browser_cookies=browser_cookies)
             if result:
                 _status("Device registered — refresh token saved")
                 return result

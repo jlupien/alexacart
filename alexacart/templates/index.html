@@ -8,6 +8,38 @@
     <p>Automate your grocery ordering from Alexa to Instacart</p>
 </div>
 
+{% if active_sessions %}
+<div class="active-sessions">
+    <p class="active-sessions-label">In Progress</p>
+    {% for s in active_sessions %}
+    <div class="card session-card">
+        <div class="session-card-body">
+            {% if s.status in ("ready", "searching") %}
+            <a href="/order/review/{{ s.session_id }}" class="btn btn-primary">Resume</a>
+            {% endif %}
+            {% if s.status == "ready" %}
+                <span class="badge badge-matched">Ready</span>
+            {% elif s.status == "searching" %}
+                <span class="badge badge-new">Searching</span>
+            {% else %}
+                <span class="badge badge-substituted">Starting</span>
+            {% endif %}
+            <span class="session-card-desc">
+                {% if s.status == "ready" %}
+                    {{ s.total_items }} item{% if s.total_items != 1 %}s{% endif %} ready for review
+                {% elif s.status == "searching" %}
+                    {{ s.searched_count }} of {{ s.total_items }} items searched
+                {% else %}
+                    Fetching your Alexa list…
+                {% endif %}
+            </span>
+            <span class="muted">Started {{ s.created_at.strftime("%-I:%M %p") }}</span>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
 <div class="start-section">
     <button
         id="start-btn"
@@ -17,7 +49,7 @@
         hx-indicator="#spinner"
         hx-on::before-request="this.disabled = true; this.textContent = 'Starting...'"
     >
-        Start Order
+        Start New Order
     </button>
     <span id="spinner" class="htmx-indicator">Fetching list...</span>
 </div>

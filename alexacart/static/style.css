@@ -448,6 +448,34 @@ main {
     gap: 0.125rem;
 }
 
+/* In-progress sessions */
+.active-sessions {
+    margin-bottom: 2rem;
+}
+
+.active-sessions-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    margin-bottom: 0.5rem;
+}
+
+.session-card {
+    margin-bottom: 0.5rem;
+}
+
+.session-card-body {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.session-card-desc {
+    font-weight: 500;
+}
+
 /* Start section */
 .start-section {
     display: flex;

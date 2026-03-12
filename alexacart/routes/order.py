@@ -95,11 +95,28 @@ class OrderSession:
     instacart_client: object | None = None
     # Detailed status text shown during logging_in phase
     status_detail: str = ""
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+_SESSION_MAX_AGE_HOURS = 24
+
+
+def _gc_sessions():
+    """Remove sessions older than 24 hours."""
+    cutoff = datetime.now(UTC).timestamp() - _SESSION_MAX_AGE_HOURS * 3600
+    stale = [sid for sid, s in _sessions.items() if s.created_at.timestamp() < cutoff]
+    for sid in stale:
+        _sessions.pop(sid, None)
 
 
 @router.get("/")
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    _gc_sessions()
+    active = [
+        s for s in _sessions.values()
+        if s.status in ("logging_in", "searching", "ready")
+    ]
+    return templates.TemplateResponse("index.html", {"request": request, "active_sessions": active})
 
 
 @router.post("/start")

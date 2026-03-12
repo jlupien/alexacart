@@ -60,15 +60,36 @@ uv run python run.py
 
 Open http://127.0.0.1:8000 in your browser.
 
-### macOS App Launcher (optional)
+### Run at Login (macOS)
 
-Build a clickable `.app` bundle so you don't need a terminal:
+Install a LaunchAgent so the server starts automatically when you log in:
 
 ```bash
-bash scripts/build_macos_app.sh
+bash scripts/install-launchagent.sh
 ```
 
-This creates `AlexaCart.app` in the project root. Double-click it (or drag it to your Dock) to start the server and open the browser automatically. When you're done, click **Shut Down Server** on the Settings page to stop everything.
+The script will prompt for your password to configure log rotation via `newsyslog` (caps `data/alexacart.log` at 5 MB). You can skip it — the server still works, logs just won't rotate.
+
+The server runs in the background at http://127.0.0.1:8000.
+
+**Managing the agent** (without removing it):
+
+```bash
+# Stop
+launchctl unload ~/Library/LaunchAgents/com.alexacart.plist
+
+# Start
+launchctl load ~/Library/LaunchAgents/com.alexacart.plist
+
+# Restart
+launchctl unload ~/Library/LaunchAgents/com.alexacart.plist && launchctl load ~/Library/LaunchAgents/com.alexacart.plist
+```
+
+**Remove entirely:**
+
+```bash
+bash scripts/uninstall-launchagent.sh
+```
 
 ## Usage
 
@@ -125,6 +146,7 @@ alexacart/
 │   ├── templates/            # Jinja2 templates
 │   └── static/               # CSS + JS
 ├── scripts/
-│   └── build_macos_app.sh    # Generates AlexaCart.app
+│   ├── install-launchagent.sh   # Install macOS LaunchAgent (start at login)
+│   └── uninstall-launchagent.sh # Remove LaunchAgent
 └── data/                     # Runtime data (gitignored)
 ```

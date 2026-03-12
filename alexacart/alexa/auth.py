@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 DEVICE_TYPE = "A2IVLV5VM2W81"
 APP_NAME = "Amazon Alexa"
 APP_VERSION = "2.2.658990.0"
-OS_VERSION = "26.3"
+OS_VERSION = "18.3.1"
 SOFTWARE_VERSION = "1"
 
 
@@ -193,6 +193,7 @@ async def _register_device(
             "code_verifier": code_verifier,
             "code_algorithm": "SHA-256",
             "client_domain": "DeviceLegacy",
+            "use_global_authentication": "true",
         },
         "user_context_map": {"frc": ""},
         "requested_token_type": [
@@ -390,7 +391,11 @@ async def refresh_cookies_via_token() -> dict | None:
 
 
 def _extract_auth_code_from_url(url: str) -> str | None:
-    """Extract the authorization_code from an OAuth redirect URL."""
+    """Extract the authorization_code from an OAuth redirect URL.
+
+    Amazon primarily uses openid.oa2.authorization_code, but some account
+    configurations return a plain 'code' parameter instead.
+    """
     from urllib.parse import parse_qs, urlparse
 
     parsed = urlparse(url)
@@ -398,6 +403,11 @@ def _extract_auth_code_from_url(url: str) -> str | None:
         params = parse_qs(parsed.query)
         code = params.get("openid.oa2.authorization_code", [None])[0]
         if code:
+            return code
+        # Fallback: some account types return 'code' instead
+        code = params.get("code", [None])[0]
+        if code:
+            logger.info("Auth code found via fallback 'code' parameter (not openid.oa2.authorization_code)")
             return code
     return None
 
@@ -469,11 +479,15 @@ async def _setup_auth_code_interceptor(page) -> list[str]:
 
 async def _wait_for_oauth_redirect(
     page, timeout_polls: int = 100, captured_codes: list[str] | None = None
-) -> str | None:
+) -> tuple[str | None, bool]:
     """
     Poll the browser page URL waiting for the OAuth redirect to maplanding.
     Also checks captured_codes from the network interceptor.
-    Returns the authorization_code if captured, or None on timeout.
+
+    Returns (authorization_code, user_logged_in):
+      - (code, True)  — got auth code, user is logged in
+      - (None, True)  — no auth code, but user is logged in (maplanding seen or on amazon.com)
+      - (None, False) — timed out, user may not be logged in yet
     """
     maplanding_polls = 0
     for _ in range(timeout_polls):  # Up to ~5 minutes
@@ -482,12 +496,12 @@ async def _wait_for_oauth_redirect(
         # Check network interceptor first (most reliable)
         if captured_codes:
             logger.info("Captured OAuth authorization code via network interceptor")
-            return captured_codes[0]
+            return captured_codes[0], True
 
         code = await _try_extract_auth_code(page)
         if code:
             logger.info("Captured OAuth authorization code from page URL")
-            return code
+            return code, True
         # Also check if user navigated away from the login flow
         url = page.url or ""
         if _is_on_maplanding(url):
@@ -499,19 +513,19 @@ async def _wait_for_oauth_redirect(
                 # Check interceptor one more time
                 if captured_codes:
                     logger.info("Captured OAuth authorization code via network interceptor (late)")
-                    return captured_codes[0]
+                    return captured_codes[0], True
                 logger.info("On maplanding page but no auth code captured — moving on")
                 logger.info("Maplanding URL: %s", url)
-                return None
+                return None, True  # User IS logged in, just no auth code
         elif "amazon.com" in url and "/ap/" not in url:
             # User is on amazon.com but not in the auth flow — login succeeded
             # but we missed the redirect (e.g. 2FA or CAPTCHA changed the flow)
             if captured_codes:
                 logger.info("Captured OAuth authorization code via network interceptor (post-redirect)")
-                return captured_codes[0]
+                return captured_codes[0], True
             logger.info("User appears logged in but OAuth redirect not captured")
-            return None
-    return None
+            return None, True  # User IS logged in, just no auth code
+    return None, False  # Timed out — user may not be logged in
 
 
 async def _retry_oauth_for_device_registration(browser, _status) -> dict | None:
@@ -785,32 +799,25 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
             await page.get(oauth_url)
             await page.sleep(2)
 
-            auth_code = await _wait_for_oauth_redirect(page, captured_codes=captured_codes)
+            auth_code, login_seen = await _wait_for_oauth_redirect(page, captured_codes=captured_codes)
             if auth_code:
                 result = await _register_device(auth_code, code_verifier, device_serial)
                 if result:
                     _status("Device registered — refresh token saved")
                     return result
                 logger.warning("Device registration failed after re-login, falling back to cookie extraction")
+            elif not login_seen:
+                # Timed out waiting for login — user may not have logged in yet
+                raise RuntimeError("Timed out waiting for Amazon re-login")
             else:
-                # Retry OAuth — user just re-logged in, second attempt should auto-redirect with auth code
+                # Maplanding seen (user logged in) but no auth code — retry OAuth
                 retry_result = await _retry_oauth_for_device_registration(browser, _status)
                 if retry_result:
                     return retry_result
 
-            # Fallback: wait for login on amazon.com and extract cookies directly
+            # User is logged in — extract cookies directly (no need to poll)
             page = await browser.get("https://www.amazon.com")
             await page.sleep(2)
-            logged_in = False
-            for _ in range(100):  # Up to ~5 minutes
-                await page.sleep(3)
-                if await _check_amazon_login(page):
-                    logged_in = True
-                    break
-
-            if not logged_in:
-                raise RuntimeError("Timed out waiting for Amazon re-login")
-
             return await _extract_and_save_cookies(browser, _status)
         finally:
             try:
@@ -900,32 +907,25 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         await page.sleep(2)
 
         _status("Waiting for Amazon login — please log in via the browser window...")
-        auth_code = await _wait_for_oauth_redirect(page, captured_codes=captured_codes)
+        auth_code, login_seen = await _wait_for_oauth_redirect(page, captured_codes=captured_codes)
         if auth_code:
             result = await _register_device(auth_code, code_verifier, device_serial)
             if result:
                 _status("Device registered — refresh token saved")
                 return result
             logger.warning("Device registration failed after login, falling back to cookie extraction")
+        elif not login_seen:
+            # Timed out — user never completed login
+            raise RuntimeError("Timed out waiting for Amazon login")
         else:
-            # Retry OAuth — user just logged in, second attempt should auto-redirect with auth code
+            # Maplanding seen (user logged in) but no auth code — retry OAuth
             retry_result = await _retry_oauth_for_device_registration(browser, _status)
             if retry_result:
                 return retry_result
 
-        # Fallback: check if we're logged in and just extract cookies
+        # User is logged in — extract cookies directly (no need to poll)
         page = await browser.get("https://www.amazon.com")
         await page.sleep(2)
-        logged_in = await _check_amazon_login(page)
-        if not logged_in:
-            for _ in range(100):
-                await page.sleep(3)
-                if await _check_amazon_login(page):
-                    logged_in = True
-                    break
-
-        if not logged_in:
-            raise RuntimeError("Timed out waiting for Amazon login")
 
         return await _extract_and_save_cookies(browser, _status)
 

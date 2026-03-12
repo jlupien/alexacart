@@ -156,6 +156,10 @@ def _build_oauth_url(
         "openid.oa2.client_id": f"device:{client_id}",
         "openid.oa2.scope": "device_auth_access",
         "openid.ns": "http://specs.openid.net/auth/2.0",
+        # serial is required — Amazon echoes it back in the maplanding redirect and
+        # uses it to include openid.oa2.authorization_code in the response.
+        # Without it, Amazon completes OpenID auth but skips the OAuth2 extension.
+        "serial": device_serial,
     }
     if force_fresh_auth:
         params["openid.ns.pape"] = "http://specs.openid.net/extensions/pape/1.0"
@@ -530,76 +534,58 @@ async def _wait_for_oauth_redirect(
 
 async def _retry_oauth_for_device_registration(browser, _status) -> dict | None:
     """
-    Retry the OAuth flow using the browser's own fetch() to capture an auth code.
+    Retry the OAuth flow via page navigation to capture an auth code.
 
     Called when the initial browser login succeeded but the auth code wasn't
-    captured (e.g. 2FA caused Amazon to drop the OAuth2 extension parameters).
+    captured (e.g. maplanding was reached but lacked openid.oa2.authorization_code).
 
-    Uses in-browser fetch() rather than httpx — this sends the full session
-    cookies, TLS fingerprint, and browser state that Amazon expects. Plain
-    HTTP requests to /ap/signin get rejected (Amazon returns the login page).
+    Since the user is already authenticated, navigating to the OAuth URL again
+    should auto-redirect to maplanding — this time with the auth code, because
+    the serial param is included in the URL.
+
+    NOTE: fetch() does NOT work here — Amazon checks Sec-Fetch-Mode and returns
+    the login page HTML for non-navigation requests.
 
     Returns cookie data dict with registration info, or None if retry didn't work.
     """
-    logger.info("Retrying OAuth for device registration...")
+    logger.info("Retrying OAuth for device registration via page navigation...")
     _status("Retrying OAuth for device registration...")
 
     page = browser.main_tab
 
-    # Navigate to amazon.com to ensure we're on the correct origin
-    await page.get("https://www.amazon.com")
-    await page.sleep(2)
-    logger.info("OAuth retry: on amazon.com (URL: %s)", page.url)
-
     code_verifier, code_challenge, device_serial = _generate_pkce()
-    oauth_url = _build_oauth_url(
-        code_challenge, device_serial, force_fresh_auth=False
+    oauth_url = _build_oauth_url(code_challenge, device_serial, force_fresh_auth=False)
+
+    # Set up interceptor BEFORE navigation so we catch the immediate redirect
+    captured_codes = await _setup_auth_code_interceptor(page)
+    await page.get(oauth_url)
+
+    # Poll up to 10 seconds — user is already logged in so redirect should be fast
+    for _ in range(5):
+        await page.sleep(2)
+        if captured_codes:
+            break
+        url = page.url or ""
+        if _is_on_maplanding(url) or ("amazon.com" in url and "/ap/" not in url):
+            break
+
+    auth_code = captured_codes[0] if captured_codes else await _try_extract_auth_code(page)
+    logger.info(
+        "OAuth retry navigation: auth_code=%s, captured=%d, url=%s",
+        "yes" if auth_code else "no",
+        len(captured_codes),
+        (page.url or "")[:200],
     )
 
-    # Use in-browser fetch() — has full session context (cookies, TLS, etc.)
-    js_url = json.dumps(oauth_url)
-    js = f"""
-    (async function() {{
-        try {{
-            var resp = await fetch({js_url}, {{
-                credentials: 'include',
-                redirect: 'follow'
-            }});
-            return JSON.stringify({{url: resp.url, status: resp.status}});
-        }} catch(e) {{
-            return JSON.stringify({{error: e.message}});
-        }}
-    }})()
-    """
-
-    try:
-        raw = await page.evaluate(js, await_promise=True)
-        result_str = raw if isinstance(raw, str) else getattr(raw, "value", None)
-        if not result_str:
-            logger.info("OAuth retry: fetch returned no result")
-            return None
-
-        fetch_result = json.loads(result_str)
-        if fetch_result.get("error"):
-            logger.warning("OAuth retry fetch error: %s", fetch_result["error"])
-            return None
-
-        final_url = fetch_result.get("url", "")
-        status = fetch_result.get("status")
-        logger.info("OAuth retry fetch: status=%s, URL=%s", status, final_url[:200])
-
-        auth_code = _extract_auth_code_from_url(final_url)
-        if auth_code:
-            logger.info("OAuth retry: captured auth code via in-browser fetch")
-            reg_result = await _register_device(auth_code, code_verifier, device_serial)
-            if reg_result:
-                _status("Device registered — refresh token saved")
-                return reg_result
-            logger.warning("OAuth retry: device registration failed despite auth code")
-        else:
-            logger.info("OAuth retry: no auth code in fetch response URL")
-    except Exception as e:
-        logger.warning("OAuth retry error: %s", e)
+    if auth_code:
+        logger.info("OAuth retry: captured auth code via page navigation")
+        reg_result = await _register_device(auth_code, code_verifier, device_serial)
+        if reg_result:
+            _status("Device registered — refresh token saved")
+            return reg_result
+        logger.warning("OAuth retry: device registration failed despite auth code")
+    else:
+        logger.info("OAuth retry: no auth code captured")
 
     return None
 
@@ -824,6 +810,7 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
                 browser.stop()
             except Exception:
                 pass
+            _kill_chrome_for_profile(profile_dir)
 
     # Normal mode: start headless — only open a visible window if login is actually needed
     _status("Checking Amazon login...")
@@ -834,9 +821,20 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         page = await browser.get("about:blank")
         captured_codes = await _setup_auth_code_interceptor(page)
         await page.get(oauth_url)
-        await page.sleep(2)
 
-        # Check if the OAuth redirected immediately (user already logged in)
+        # Poll up to 12 seconds for the OAuth redirect.
+        # Chrome can take 8-12s to complete the maplanding redirect even for
+        # an already-logged-in session. A flat 2s sleep misses the redirect and
+        # incorrectly triggers a visible browser.
+        for _ in range(6):
+            await page.sleep(2)
+            if captured_codes:
+                break
+            url = page.url or ""
+            if _is_on_maplanding(url) or ("amazon.com" in url and "/ap/" not in url):
+                break
+
+        # Check if the OAuth redirected (user already logged in)
         auth_code = captured_codes[0] if captured_codes else await _try_extract_auth_code(page)
         page_url_now = page.url or ""
         logger.info(
@@ -934,6 +932,7 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
             browser.stop()
         except Exception:
             pass
+        _kill_chrome_for_profile(profile_dir)
 
 
 async def validate_alexa_cookies(cookie_data: dict) -> bool:

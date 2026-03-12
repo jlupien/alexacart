@@ -18,6 +18,8 @@ import base64
 import hashlib
 import json
 import logging
+import os
+import signal
 import secrets
 from datetime import UTC, datetime
 from pathlib import Path
@@ -518,6 +520,27 @@ async def _wait_for_oauth_redirect(
                 if captured_codes:
                     logger.info("Captured OAuth authorization code via network interceptor (late)")
                     return captured_codes[0], True
+                # Log the full href including any URL fragment (#) — the auth code
+                # may be passed via fragment rather than query params (fragments are
+                # not included in HTTP request URLs, so the interceptor won't catch them).
+                try:
+                    full_href = await page.evaluate("window.location.href")
+                    fragment = (full_href or "").split("#", 1)[1] if "#" in (full_href or "") else ""
+                    if fragment:
+                        logger.info("Maplanding page has URL fragment: #%s", fragment[:500])
+                        frag_code = _extract_auth_code_from_url(f"https://placeholder/?{fragment}")
+                        if frag_code:
+                            logger.info("Found auth code in URL fragment!")
+                            return frag_code, True
+                    else:
+                        logger.info("Maplanding page has no URL fragment")
+                    # Log a snippet of page HTML for diagnosis
+                    html_snippet = await page.evaluate(
+                        "document.body ? document.body.innerText.slice(0, 300) : ''"
+                    )
+                    logger.info("Maplanding page body text (first 300 chars): %s", html_snippet)
+                except Exception as e:
+                    logger.debug("Could not inspect maplanding page: %s", e)
                 logger.info("On maplanding page but no auth code captured — moving on")
                 logger.info("Maplanding URL: %s", url)
                 return None, True  # User IS logged in, just no auth code
@@ -671,6 +694,27 @@ def _clean_profile_locks(profile_dir: Path) -> bool:
     return cleaned
 
 
+def _stop_browser(browser, profile_dir: Path) -> None:
+    """Stop the nodriver browser and ensure Chrome is killed.
+
+    browser.stop() sends a close signal but on macOS Chrome often ignores it
+    and stays open. We grab the PID beforehand and SIGKILL it afterwards.
+    """
+    chrome_pid = getattr(browser, '_process_pid', None)
+    try:
+        browser.stop()
+    except Exception:
+        pass
+    if chrome_pid:
+        try:
+            os.kill(chrome_pid, signal.SIGKILL)
+            logger.info("Force-killed Chrome process %d", chrome_pid)
+        except ProcessLookupError:
+            pass  # Already exited cleanly after browser.stop()
+    else:
+        _kill_chrome_for_profile(profile_dir)
+
+
 async def _start_browser(
     profile_dir: Path, headless: bool = True, start_url: str | None = None
 ):
@@ -795,22 +839,14 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
             elif not login_seen:
                 # Timed out waiting for login — user may not have logged in yet
                 raise RuntimeError("Timed out waiting for Amazon re-login")
-            else:
-                # Maplanding seen (user logged in) but no auth code — retry OAuth
-                retry_result = await _retry_oauth_for_device_registration(browser, _status)
-                if retry_result:
-                    return retry_result
+            # else: maplanding seen but no auth code — fall through to cookie extraction.
 
             # User is logged in — extract cookies directly (no need to poll)
             page = await browser.get("https://www.amazon.com")
             await page.sleep(2)
             return await _extract_and_save_cookies(browser, _status)
         finally:
-            try:
-                browser.stop()
-            except Exception:
-                pass
-            _kill_chrome_for_profile(profile_dir)
+            _stop_browser(browser, profile_dir)
 
     # Normal mode: start headless — only open a visible window if login is actually needed
     _status("Checking Amazon login...")
@@ -822,17 +858,21 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         captured_codes = await _setup_auth_code_interceptor(page)
         await page.get(oauth_url)
 
-        # Poll up to 12 seconds for the OAuth redirect.
-        # Chrome can take 8-12s to complete the maplanding redirect even for
-        # an already-logged-in session. A flat 2s sleep misses the redirect and
-        # incorrectly triggers a visible browser.
-        for _ in range(6):
+        # Poll up to 12 seconds for the OAuth redirect (logged-in sessions can
+        # take 8-12s to complete). But exit early if stuck on /ap/signin — that
+        # means there's no active session and waiting longer won't help.
+        prev_url = ""
+        for i in range(6):
             await page.sleep(2)
             if captured_codes:
                 break
             url = page.url or ""
             if _is_on_maplanding(url) or ("amazon.com" in url and "/ap/" not in url):
                 break
+            # If we've been on the same signin page for 2+ polls, give up on headless
+            if i >= 1 and "/ap/signin" in url and url == prev_url:
+                break
+            prev_url = url
 
         # Check if the OAuth redirected (user already logged in)
         auth_code = captured_codes[0] if captured_codes else await _try_extract_auth_code(page)
@@ -893,7 +933,7 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         # Need manual login — restart with a visible browser window.
         # Add delay + retry: the old Chrome process may still hold the profile
         # lock, and concurrent browser-use launches can cause resource contention.
-        browser.stop()
+        _stop_browser(browser, profile_dir)
         await asyncio.sleep(2)
         _status("Login needed — opening Amazon login window...")
         # Generate fresh PKCE to avoid server-side state issues from the headless attempt
@@ -915,11 +955,10 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         elif not login_seen:
             # Timed out — user never completed login
             raise RuntimeError("Timed out waiting for Amazon login")
-        else:
-            # Maplanding seen (user logged in) but no auth code — retry OAuth
-            retry_result = await _retry_oauth_for_device_registration(browser, _status)
-            if retry_result:
-                return retry_result
+        # else: maplanding seen but no auth code — fall through to cookie extraction.
+        # Do NOT retry the OAuth URL here: navigating back to the OAuth URL after
+        # maplanding shows the sign-in page (maplanding invalidates the OAuth session
+        # state), which confuses the user and wastes ~10 seconds with no benefit.
 
         # User is logged in — extract cookies directly (no need to poll)
         page = await browser.get("https://www.amazon.com")
@@ -928,11 +967,7 @@ async def extract_cookies_via_nodriver(on_status=None, force_relogin=False) -> d
         return await _extract_and_save_cookies(browser, _status)
 
     finally:
-        try:
-            browser.stop()
-        except Exception:
-            pass
-        _kill_chrome_for_profile(profile_dir)
+        _stop_browser(browser, profile_dir)
 
 
 async def validate_alexa_cookies(cookie_data: dict) -> bool:

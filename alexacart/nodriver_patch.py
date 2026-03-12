@@ -1,9 +1,14 @@
 """
-Patch nodriver's browser connection timeout for slow Chrome startup.
+Patches applied to nodriver for compatibility with newer Chrome versions.
 
-On Apple Silicon running Chrome under Rosetta (x86_64), Chrome can take
-5+ seconds to start. nodriver's default timeout is ~2.75s (0.25s initial
-wait + 5 retries * 0.5s). This patch increases it to ~10s.
+1. Browser connection timeout — Chrome on Apple Silicon (Rosetta) can take
+   5+ seconds to start. nodriver's default timeout is ~2.75s. Increased to ~10s.
+
+2. CDP Cookie.from_json — Chrome 146 dropped the `sameParty` field but nodriver
+   0.48.1 treats it as required, causing constant KeyError spam in the logs.
+
+3. CDP ClientSecurityState.from_json — Chrome 146 dropped `privateNetworkRequestPolicy`
+   from some events; same issue.
 
 Import this module and call patch() before any nodriver usage.
 """
@@ -13,6 +18,7 @@ import logging
 import pathlib
 import warnings
 
+import nodriver.cdp.network as _network_mod
 import nodriver.core.browser as _browser_mod
 from nodriver.core.browser import (
     Connection,
@@ -146,3 +152,27 @@ def patch():
 
     _browser_mod.Browser.start = _start_with_longer_timeout
     logger.debug("Patched nodriver browser connection timeout (%d retries)", _RETRIES)
+
+    # --- Patch 2: Cookie.from_json — handle missing 'sameParty' (dropped in Chrome 146) ---
+    _orig_cookie_from_json = _network_mod.Cookie.from_json.__func__
+
+    @classmethod  # type: ignore[misc]
+    def _cookie_from_json(cls, json):
+        if 'sameParty' not in json:
+            json = {**json, 'sameParty': False}
+        return _orig_cookie_from_json(cls, json)
+
+    _network_mod.Cookie.from_json = _cookie_from_json
+    logger.debug("Patched nodriver Cookie.from_json (sameParty optional)")
+
+    # --- Patch 3: ClientSecurityState.from_json — handle missing 'privateNetworkRequestPolicy' ---
+    _orig_css_from_json = _network_mod.ClientSecurityState.from_json.__func__
+
+    @classmethod  # type: ignore[misc]
+    def _client_security_state_from_json(cls, json):
+        if 'privateNetworkRequestPolicy' not in json:
+            json = {**json, 'privateNetworkRequestPolicy': 'Allow'}
+        return _orig_css_from_json(cls, json)
+
+    _network_mod.ClientSecurityState.from_json = _client_security_state_from_json
+    logger.debug("Patched nodriver ClientSecurityState.from_json (privateNetworkRequestPolicy optional)")

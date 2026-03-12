@@ -35,14 +35,25 @@ cp .env.example .env
 ```
 
 ```
-# Directory for database (preferences, order log) — can be synced across machines
+# Directory for database (preferences, order log) — default: ./data/
+# Set to a synced folder (e.g. Dropbox) to share preferences across machines
 DATA_DIR=
 
-# Directory for login cookies and browser profiles — always local per machine
+# Directory for login cookies and browser profiles — default: ./data/
+# Always local per machine (do NOT sync this)
 LOCAL_DATA_DIR=
 
 ALEXA_LIST_NAME=Grocery List
 INSTACART_STORE=Wegmans
+
+# When debugging, you can skip checking off list items
+#SKIP_ALEXA_CHECKOFF=true
+
+# Debug: clear cookies on order start to test the login workflow
+# Amazon: clears data/cookies.json + nodriver profile (data/nodriver-amazon/)
+# Instacart: clears data/instacart_cookies.json + nodriver profile (data/nodriver-instacart/)
+#DEBUG_CLEAR_AMAZON_COOKIES=true
+#DEBUG_CLEAR_INSTACART_COOKIES=true
 ```
 
 | Variable | Description | Default |
@@ -51,6 +62,9 @@ INSTACART_STORE=Wegmans
 | `LOCAL_DATA_DIR` | Where login cookies and nodriver browser profiles are stored. Always local per machine. | `./data/` |
 | `ALEXA_LIST_NAME` | Name of your Alexa shopping list | `Grocery List` |
 | `INSTACART_STORE` | Instacart store to search (must match the store name on Instacart) | `Wegmans` |
+| `SKIP_ALEXA_CHECKOFF` | Skip checking off items on the Alexa list after commit (useful for debugging) | `false` |
+| `DEBUG_CLEAR_AMAZON_COOKIES` | Clear Amazon cookies + Chrome profile on each order start (forces re-login) | `false` |
+| `DEBUG_CLEAR_INSTACART_COOKIES` | Clear Instacart cookies + Chrome profile on each order start (forces re-login) | `false` |
 
 ### Run
 
@@ -100,8 +114,8 @@ bash scripts/uninstall-launchagent.sh
 
 1. Click "Start Order" on the home page
 2. Chrome windows open — log into Amazon and Instacart if prompted (first time only; sessions persist across runs via nodriver Chrome profiles)
-3. The app fetches your Alexa list and searches Instacart for each item. Your #1 preferred products are auto-added to cart during search.
-4. Review the proposed matches — auto-added items are shown read-only; pick alternatives or paste a custom Instacart URL for the rest
+3. The app fetches your Alexa list and searches Instacart for each item. Your preferred products are at the top, if available.
+4. Review the proposed matches — pick alternatives or paste a custom Instacart URL for the rest
 5. Click "Add Remaining to Cart" — live progress updates show each item being added to your cart and checked off the Alexa list
 
 ### Manage Preferences
@@ -115,6 +129,16 @@ Visit `/preferences` to:
 ### Order History
 
 Visit `/order/history` to see past orders and which items were corrected. You can delete individual sessions or clear all history.
+
+### Settings
+
+Visit `/settings` to:
+
+- Check Amazon and Instacart login status
+- Validate Amazon cookies against the real API
+- Log out of Amazon or Instacart (clears cookies + Chrome profile)
+- View DB stats and current config
+- Shut down the server
 
 ## Architecture
 
@@ -134,6 +158,7 @@ alexacart/
 │   ├── config.py             # Settings from .env
 │   ├── db.py                 # SQLAlchemy setup
 │   ├── models.py             # ORM models
+│   ├── nodriver_patch.py     # Compatibility patches for newer Chrome versions
 │   ├── alexa/                # Amazon/Alexa integration
 │   │   ├── auth.py           # Cookie management (OAuth device registration + nodriver)
 │   │   └── client.py         # Alexa list API client (httpx)

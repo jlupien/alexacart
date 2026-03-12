@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from html import escape as html_escape
 
 from fastapi import APIRouter, Depends, Form, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy.orm import Session
 
@@ -117,6 +117,13 @@ async def index(request: Request):
         if s.status in ("logging_in", "searching", "ready")
     ]
     return templates.TemplateResponse("index.html", {"request": request, "active_sessions": active})
+
+
+@router.delete("/session/{session_id}")
+async def delete_session(session_id: str):
+    """Delete an in-progress order session."""
+    _sessions.pop(session_id, None)
+    return Response(status_code=200)
 
 
 @router.post("/start")

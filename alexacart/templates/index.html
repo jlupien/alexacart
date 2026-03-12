@@ -12,11 +12,18 @@
 <div class="active-sessions">
     <p class="active-sessions-label">In Progress</p>
     {% for s in active_sessions %}
-    <div class="card session-card">
+    <div class="card session-card" id="session-{{ s.session_id }}">
         <div class="session-card-body">
             {% if s.status in ("ready", "searching") %}
             <a href="/order/review/{{ s.session_id }}" class="btn btn-primary">Resume</a>
             {% endif %}
+            <button
+                class="btn btn-sm btn-danger"
+                hx-delete="/order/session/{{ s.session_id }}"
+                hx-target="#session-{{ s.session_id }}"
+                hx-swap="outerHTML"
+                hx-confirm="Delete this in-progress session?"
+            >Delete</button>
             {% if s.status == "ready" %}
                 <span class="badge badge-matched">Ready</span>
             {% elif s.status == "searching" %}

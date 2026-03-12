@@ -15,6 +15,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import Enum
 from html import escape as html_escape
 
 from fastapi import APIRouter, Depends, Form, Query, Request
@@ -39,6 +40,14 @@ router = APIRouter(prefix="/order", tags=["order"])
 
 # In-memory store for active order sessions
 _sessions: dict[str, "OrderSession"] = {}
+
+
+class OrderStatus(str, Enum):
+    STARTING = "starting"
+    LOGGING_IN = "logging_in"
+    SEARCHING = "searching"
+    READY = "ready"
+    ERROR = "error"
 
 
 @dataclass
@@ -84,7 +93,7 @@ class OrderSession:
     proposals: list[ProposalItem] = field(default_factory=list)
     total_items: int = 0
     searched_count: int = 0
-    status: str = "starting"  # starting, searching, ready, committing, done
+    status: OrderStatus = OrderStatus.STARTING
     error: str | None = None
     active_searches: set = field(default_factory=set)
     # Commit state (queue-based for reliable SSE delivery)
@@ -114,7 +123,7 @@ async def index(request: Request):
     _gc_sessions()
     active = [
         s for s in _sessions.values()
-        if s.status in ("logging_in", "searching", "ready")
+        if s.status in (OrderStatus.LOGGING_IN, OrderStatus.SEARCHING, OrderStatus.READY)
     ]
     return templates.TemplateResponse("index.html", {"request": request, "active_sessions": active})
 
@@ -125,7 +134,7 @@ async def delete_session(request: Request, session_id: str):
     _sessions.pop(session_id, None)
     active = [
         s for s in _sessions.values()
-        if s.status in ("logging_in", "searching", "ready")
+        if s.status in (OrderStatus.LOGGING_IN, OrderStatus.SEARCHING, OrderStatus.READY)
     ]
     return templates.TemplateResponse(
         "partials/active_sessions.html",
@@ -138,7 +147,7 @@ async def start_order(request: Request):
     """Start the order flow. Launches browser, checks logins, fetches Alexa list, searches."""
     session_id = str(uuid.uuid4())
     session = OrderSession(session_id=session_id)
-    session.status = "logging_in"
+    session.status = OrderStatus.LOGGING_IN
     _sessions[session_id] = session
 
     # Everything runs in the background task — logins, Alexa fetch, Instacart search
@@ -166,7 +175,7 @@ async def _run_order(session: OrderSession):
 
     try:
         # Step 1: Parallel auth — Instacart via cached cookies, Amazon via token refresh or nodriver.
-        session.status = "logging_in"
+        session.status = OrderStatus.LOGGING_IN
         session.status_detail = "Checking logins..."
 
         on_status = lambda msg: setattr(session, "status_detail", msg)
@@ -228,19 +237,19 @@ async def _run_order(session: OrderSession):
                 if isinstance(instacart_result, Exception):
                     logger.error("Instacart auth failed: %s", instacart_result, exc_info=True)
                     session.error = f"Instacart login failed: {instacart_result}"
-                    session.status = "error"
+                    session.status = OrderStatus.ERROR
                     return
                 instacart_data = instacart_result
 
                 if isinstance(amazon_result, Exception):
                     logger.error("nodriver cookie extraction failed: %s", amazon_result, exc_info=True)
                     session.error = f"Amazon authentication failed: {amazon_result}"
-                    session.status = "error"
+                    session.status = OrderStatus.ERROR
                     return
                 cookie_data = amazon_result
                 if not cookie_data or not cookie_data.get("cookies"):
                     session.error = "Could not extract Amazon cookies. Please try again."
-                    session.status = "error"
+                    session.status = OrderStatus.ERROR
                     return
 
         # Create Instacart client
@@ -275,17 +284,16 @@ async def _run_order(session: OrderSession):
                     session.error = "Amazon servers are temporarily unavailable. Please try again in a minute."
                 else:
                     session.error = f"Failed to fetch Alexa list: {error_str}"
-                session.status = "error"
+                session.status = OrderStatus.ERROR
                 return
 
             if not items:
                 session.error = "No items found on your Alexa Grocery List. Add some items via Alexa and try again."
-                session.status = "error"
+                session.status = OrderStatus.ERROR
                 return
 
             # Deduplicate items: group by grocery_item_id (known) or normalized text (unknown)
-            db = SessionLocal()
-            try:
+            with SessionLocal() as db:
                 groups: dict[str | int, list] = {}
                 for item in items:
                     normalized = normalize_text(item.text)
@@ -295,8 +303,6 @@ async def _run_order(session: OrderSession):
                     else:
                         key = f"_unknown:{normalized}"
                     groups.setdefault(key, []).append(item)
-            finally:
-                db.close()
 
             for i, group_items in enumerate(groups.values()):
                 primary = group_items[0]
@@ -325,7 +331,7 @@ async def _run_order(session: OrderSession):
     except Exception as e:
         logger.exception("Order flow failed")
         session.error = str(e)
-        session.status = "error"
+        session.status = OrderStatus.ERROR
         if session.instacart_client:
             await session.instacart_client.close()
             session.instacart_client = None
@@ -412,114 +418,113 @@ async def _search_single_item(
     results in parallel, then combines them (preferences first, de-duped search after).
     For unknown items: just runs a search.
     """
-    db = SessionLocal()
-
     session.active_searches.add(proposal.alexa_text)
     try:
-        match = find_match(db, proposal.alexa_text)
-        proposal.grocery_item_id = match.grocery_item_id
-        proposal.grocery_item_name = match.grocery_item_name
+        with SessionLocal() as db:
+            match = find_match(db, proposal.alexa_text)
+            proposal.grocery_item_id = match.grocery_item_id
+            proposal.grocery_item_name = match.grocery_item_name
 
-        if match.is_known and match.preferred_products:
-            # Fetch ALL preference details + search results in parallel
-            async def _fetch_pref(pref):
-                """Fetch current details for a single preferred product."""
-                try:
-                    if not pref.product_url:
-                        return None
-                    result = await client.get_product_details(pref.product_url)
-                    if result:
-                        if result.in_stock:
-                            pref.last_seen_in_stock = datetime.now(UTC)
-                        return ProductOption(
-                            product_name=result.product_name,
-                            product_url=result.product_url or pref.product_url,
-                            brand=result.brand or pref.brand,
-                            price=result.price,
-                            image_url=result.image_url or pref.image_url,
-                            in_stock=result.in_stock,
-                            item_id=result.item_id,
-                            size=result.size or pref.size,
-                            source="preference",
-                        )
-                except Exception as e:
-                    logger.warning("Failed to fetch pref '%s': %s", pref.product_name, e)
-                return None
+            if match.is_known and match.preferred_products:
+                # Fetch ALL preference details + search results in parallel
+                async def _fetch_pref(pref):
+                    """Fetch current details for a single preferred product."""
+                    try:
+                        if not pref.product_url:
+                            return None
+                        result = await client.get_product_details(pref.product_url)
+                        if result:
+                            if result.in_stock:
+                                pref.last_seen_in_stock = datetime.now(UTC)
+                            return ProductOption(
+                                product_name=result.product_name,
+                                product_url=result.product_url or pref.product_url,
+                                brand=result.brand or pref.brand,
+                                price=result.price,
+                                image_url=result.image_url or pref.image_url,
+                                in_stock=result.in_stock,
+                                item_id=result.item_id,
+                                size=result.size or pref.size,
+                                source="preference",
+                            )
+                    except Exception as e:
+                        logger.warning("Failed to fetch pref '%s': %s", pref.product_name, e)
+                    return None
 
-            # Launch all fetches in parallel: each preference + one search
-            pref_tasks = [_fetch_pref(pref) for pref in match.preferred_products]
-            all_results = await asyncio.gather(
-                *pref_tasks,
-                client.search_products(proposal.alexa_text),
-                return_exceptions=True,
-            )
+                # Launch all fetches in parallel: each preference + one search
+                pref_tasks = [_fetch_pref(pref) for pref in match.preferred_products]
+                all_results = await asyncio.gather(
+                    *pref_tasks,
+                    client.search_products(proposal.alexa_text),
+                    return_exceptions=True,
+                )
 
-            # Split results: preferences (first N) and search (last one)
-            pref_results = all_results[:-1]
-            search_results_raw = all_results[-1]
+                # Split results: preferences (first N) and search (last one)
+                pref_results = all_results[:-1]
+                search_results_raw = all_results[-1]
 
-            db.commit()  # persist any last_seen_in_stock updates
+                db.commit()  # persist any last_seen_in_stock updates
 
-            # Build preference options (in-stock only, preserve rank order, skip None/errors)
-            pref_options = []
-            pref_ids = set()  # for de-duping search results
-            for r in pref_results:
-                if isinstance(r, Exception) or r is None:
-                    continue
-                pref_ids.add(r.item_id)
-                if r.product_url:
-                    pref_ids.add(r.product_url)
-                if r.in_stock:
-                    pref_options.append(r)
-
-            # Build search options, de-duped against preferences, in-stock only
-            search_options = []
-            if isinstance(search_results_raw, list):
-                for r in search_results_raw:
-                    if not r.in_stock:
+                # Build preference options (in-stock only, preserve rank order, skip None/errors)
+                pref_options = []
+                pref_ids = set()  # for de-duping search results
+                for r in pref_results:
+                    if isinstance(r, Exception) or r is None:
                         continue
-                    if r.item_id in pref_ids or (r.product_url and r.product_url in pref_ids):
-                        continue
-                    search_options.append(ProductOption(
-                        product_name=r.product_name,
-                        product_url=r.product_url,
-                        brand=r.brand,
-                        price=r.price,
-                        image_url=r.image_url,
-                        in_stock=r.in_stock,
-                        item_id=r.item_id,
-                        size=r.size,
-                        source="search",
-                    ))
+                    pref_ids.add(r.item_id)
+                    if r.product_url:
+                        pref_ids.add(r.product_url)
+                    if r.in_stock:
+                        pref_options.append(r)
 
-            # Combine: in-stock preferences → in-stock search results
-            all_options = pref_options + search_options
+                # Build search options, de-duped against preferences, in-stock only
+                search_options = []
+                if isinstance(search_results_raw, list):
+                    for r in search_results_raw:
+                        if not r.in_stock:
+                            continue
+                        if r.item_id in pref_ids or (r.product_url and r.product_url in pref_ids):
+                            continue
+                        search_options.append(ProductOption(
+                            product_name=r.product_name,
+                            product_url=r.product_url,
+                            brand=r.brand,
+                            price=r.price,
+                            image_url=r.image_url,
+                            in_stock=r.in_stock,
+                            item_id=r.item_id,
+                            size=r.size,
+                            source="search",
+                        ))
 
-            if all_options:
-                best = all_options[0]
-                proposal.product_name = best.product_name
-                proposal.product_url = best.product_url
-                proposal.brand = best.brand
-                proposal.price = best.price
-                proposal.image_url = best.image_url
-                proposal.item_id = best.item_id
-                proposal.size = best.size
-                proposal.in_stock = best.in_stock
-                proposal.alternatives = all_options
+                # Combine: in-stock preferences → in-stock search results
+                all_options = pref_options + search_options
 
-                if pref_options:
-                    proposal.status = "Matched"
-                    proposal.status_class = "matched"
+                if all_options:
+                    best = all_options[0]
+                    proposal.product_name = best.product_name
+                    proposal.product_url = best.product_url
+                    proposal.brand = best.brand
+                    proposal.price = best.price
+                    proposal.image_url = best.image_url
+                    proposal.item_id = best.item_id
+                    proposal.size = best.size
+                    proposal.in_stock = best.in_stock
+                    proposal.alternatives = all_options
+
+                    if pref_options:
+                        proposal.status = "Matched"
+                        proposal.status_class = "matched"
+                    else:
+                        proposal.status = "Substituted"
+                        proposal.status_class = "substituted"
                 else:
-                    proposal.status = "Substituted"
-                    proposal.status_class = "substituted"
+                    proposal.status = "No results"
+                    proposal.status_class = "error"
             else:
-                proposal.status = "No results"
-                proposal.status_class = "error"
-        else:
-            await _apply_search_results(
-                proposal, client, proposal.alexa_text, "New item", "new",
-            )
+                await _apply_search_results(
+                    proposal, client, proposal.alexa_text, "New item", "new",
+                )
 
     except Exception as e:
         logger.error("Search failed for '%s': %s", proposal.alexa_text, e)
@@ -528,12 +533,11 @@ async def _search_single_item(
     finally:
         session.active_searches.discard(proposal.alexa_text)
         session.searched_count += 1
-        db.close()
 
 
 async def _search_items(session: OrderSession, client):
     """Search Instacart for each item in the session — in parallel via API."""
-    session.status = "searching"
+    session.status = OrderStatus.SEARCHING
 
     try:
         logger.info("Searching %d items via Instacart API", len(session.proposals))
@@ -551,12 +555,12 @@ async def _search_items(session: OrderSession, client):
             if isinstance(result, Exception):
                 logger.error("Parallel search task %d failed: %s", i, result)
 
-        session.status = "ready"
+        session.status = OrderStatus.READY
 
     except Exception as e:
         logger.exception("Search task failed")
         session.error = str(e)
-        session.status = "ready"
+        session.status = OrderStatus.READY
 
 
 @router.get("/progress/{session_id}")
@@ -570,7 +574,7 @@ async def progress_stream(session_id: str):
             yield {"event": "close", "data": ""}
             return
 
-        while session.status == "logging_in":
+        while session.status == OrderStatus.LOGGING_IN:
             detail = html_escape(session.status_detail or "Starting up...")
             yield {
                 "event": "progress",
@@ -582,34 +586,16 @@ async def progress_stream(session_id: str):
             }
             await asyncio.sleep(2)
 
-        if session.status == "error":
+        if session.status == OrderStatus.ERROR:
             yield {
                 "event": "progress",
                 "data": f'<div class="status-message status-error">{html_escape(session.error or "")}</div>',
             }
             yield {"event": "close", "data": ""}
+            _sessions.pop(session_id, None)
             return
 
-        while session.status == "fetching_list":
-            yield {
-                "event": "progress",
-                "data": (
-                    '<div class="progress-container">'
-                    '<p class="progress-text">Fetching your Alexa shopping list...</p>'
-                    '</div>'
-                ),
-            }
-            await asyncio.sleep(2)
-
-        if session.status == "error":
-            yield {
-                "event": "progress",
-                "data": f'<div class="status-message status-error">{html_escape(session.error or "")}</div>',
-            }
-            yield {"event": "close", "data": ""}
-            return
-
-        while session.status == "searching":
+        while session.status == OrderStatus.SEARCHING:
             pct = (
                 int(session.searched_count / session.total_items * 100)
                 if session.total_items > 0
@@ -834,8 +820,7 @@ async def _commit_single_item(
     item_id = data.get("item_id", "")
 
     if data.get("skip") == "1":
-        db = SessionLocal()
-        try:
+        with SessionLocal() as db:
             proposal = None
             for p in session.proposals:
                 if p.index == idx:
@@ -850,8 +835,6 @@ async def _commit_single_item(
             )
             db.add(log_entry)
             db.commit()
-        finally:
-            db.close()
         await q.put(("skip", idx, alexa_text, commit_counter[0], total))
         return {"text": alexa_text, "success": True, "reason": "Skipped", "skipped": True}
 
@@ -860,8 +843,6 @@ async def _commit_single_item(
         reason = "No product selected" if not product_name else "No item ID"
         await q.put(("done", idx, alexa_text, False, reason, commit_counter[0], total))
         return {"text": alexa_text, "success": False, "reason": reason}
-
-    db = SessionLocal()
 
     session.active_commits.add(alexa_text)
     try:
@@ -886,32 +867,33 @@ async def _commit_single_item(
         if proposal and proposal.product_name and proposal.product_name != product_name:
             was_corrected = True
 
-        log_entry = OrderLog(
-            session_id=session.session_id,
-            alexa_text=alexa_text,
-            matched_grocery_item_id=int(grocery_item_id) if grocery_item_id else None,
-            proposed_product=proposal.product_name if proposal else None,
-            final_product=product_name,
-            was_corrected=was_corrected,
-            added_to_cart=added,
-        )
-        db.add(log_entry)
-
-        if added and product_url:
-            image_url = data.get("image_url") or (proposal.image_url if proposal else None)
-            size = data.get("size") or (proposal.size if proposal else None)
-            _learn_from_result(
-                db,
+        with SessionLocal() as db:
+            log_entry = OrderLog(
+                session_id=session.session_id,
                 alexa_text=alexa_text,
-                grocery_item_id=int(grocery_item_id) if grocery_item_id else None,
+                matched_grocery_item_id=int(grocery_item_id) if grocery_item_id else None,
+                proposed_product=proposal.product_name if proposal else None,
                 final_product=product_name,
-                product_url=product_url,
-                brand=data.get("brand"),
-                image_url=image_url,
-                size=size or None,
+                was_corrected=was_corrected,
+                added_to_cart=added,
             )
+            db.add(log_entry)
 
-        db.commit()
+            if added and product_url:
+                image_url = data.get("image_url") or (proposal.image_url if proposal else None)
+                size = data.get("size") or (proposal.size if proposal else None)
+                _learn_from_result(
+                    db,
+                    alexa_text=alexa_text,
+                    grocery_item_id=int(grocery_item_id) if grocery_item_id else None,
+                    final_product=product_name,
+                    product_url=product_url,
+                    brand=data.get("brand"),
+                    image_url=image_url,
+                    size=size or None,
+                )
+
+            db.commit()
 
         reason = ""
         if not added:
@@ -932,13 +914,11 @@ async def _commit_single_item(
 
     except Exception as e:
         logger.error("Commit failed for '%s': %s", alexa_text, e)
-        db.rollback()
         commit_counter[0] += 1
         await q.put(("done", idx, alexa_text, False, str(e), commit_counter[0], total))
         return {"text": alexa_text, "success": False, "reason": str(e)}
     finally:
         session.active_commits.discard(alexa_text)
-        db.close()
 
 
 async def _run_commit(session: OrderSession):

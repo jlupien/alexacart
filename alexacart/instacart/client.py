@@ -129,10 +129,13 @@ class InstacartClient:
         orig_cart = self._cart_id
         if not self._address_id or not self._shop_id:
             await self._discover_session_context()
-        if self._cart_id:
-            await self._validate_cart_id()
-        if not self._cart_id:
-            await self._discover_cart_id()
+        # Hold the cart lock while validating/discovering so concurrent
+        # add_to_cart() calls can't race against cart ID changes here.
+        async with self._cart_lock:
+            if self._cart_id:
+                await self._validate_cart_id()
+            if not self._cart_id:
+                await self._discover_cart_id()
         # Persist newly discovered address_id / cart_id so future sessions
         # don't need to re-discover them.
         if self._address_id != orig_address or self._cart_id != orig_cart:
@@ -152,10 +155,21 @@ class InstacartClient:
             "extensions": json.dumps(self._apq_extensions(operation), separators=(",", ":")),
         }
         headers = {"x-page-view-id": str(uuid.uuid4())}
-        resp = await self._client.get(GRAPHQL_URL, params=params, headers=headers)
-        if resp.status_code == 401:
-            raise InstacartAuthError("Instacart session expired (401)")
-        resp.raise_for_status()
+        for attempt in range(3):
+            resp = await self._client.get(GRAPHQL_URL, params=params, headers=headers)
+            if resp.status_code == 401:
+                raise InstacartAuthError("Instacart session expired (401)")
+            if resp.status_code in (429, 502, 503) and attempt < 2:
+                wait = 2 ** attempt
+                logger.warning(
+                    "Instacart %s returned %d, retrying in %ds (attempt %d/3)",
+                    operation, resp.status_code, wait, attempt + 1,
+                )
+                await asyncio.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        resp.raise_for_status()  # final attempt already raised above, but satisfies type checker
         return resp.json()
 
     async def _graphql_post(self, operation: str, variables: dict) -> dict:
@@ -165,13 +179,24 @@ class InstacartClient:
             "extensions": self._apq_extensions(operation),
         }
         headers = {"x-page-view-id": str(uuid.uuid4())}
-        resp = await self._client.post(
-            f"{GRAPHQL_URL}?operationName={operation}",
-            json=body,
-            headers=headers,
-        )
-        if resp.status_code == 401:
-            raise InstacartAuthError("Instacart session expired (401)")
+        for attempt in range(3):
+            resp = await self._client.post(
+                f"{GRAPHQL_URL}?operationName={operation}",
+                json=body,
+                headers=headers,
+            )
+            if resp.status_code == 401:
+                raise InstacartAuthError("Instacart session expired (401)")
+            if resp.status_code in (429, 502, 503) and attempt < 2:
+                wait = 2 ** attempt
+                logger.warning(
+                    "Instacart %s returned %d, retrying in %ds (attempt %d/3)",
+                    operation, resp.status_code, wait, attempt + 1,
+                )
+                await asyncio.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json()
         resp.raise_for_status()
         return resp.json()
 

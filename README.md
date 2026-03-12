@@ -83,6 +83,9 @@ launchctl load ~/Library/LaunchAgents/com.alexacart.plist
 
 # Restart
 launchctl unload ~/Library/LaunchAgents/com.alexacart.plist && launchctl load ~/Library/LaunchAgents/com.alexacart.plist
+
+# Restart + clear logs (truncates the log file in-place; no need to reopen in editor)
+bash scripts/restart-launchagent.sh
 ```
 
 **Remove entirely:**
@@ -147,6 +150,7 @@ alexacart/
 │   └── static/               # CSS + JS
 ├── scripts/
 │   ├── install-launchagent.sh   # Install macOS LaunchAgent (start at login)
+│   ├── restart-launchagent.sh  # Restart agent + clear log (dev helper)
 │   └── uninstall-launchagent.sh # Remove LaunchAgent
 └── data/                     # Runtime data (gitignored)
 ```

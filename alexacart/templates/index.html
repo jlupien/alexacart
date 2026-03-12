@@ -8,44 +8,7 @@
     <p>Automate your grocery ordering from Alexa to Instacart</p>
 </div>
 
-{% if active_sessions %}
-<div class="active-sessions">
-    <p class="active-sessions-label">In Progress</p>
-    {% for s in active_sessions %}
-    <div class="card session-card" id="session-{{ s.session_id }}">
-        <div class="session-card-body">
-            {% if s.status in ("ready", "searching") %}
-            <a href="/order/review/{{ s.session_id }}" class="btn btn-primary">Resume</a>
-            {% endif %}
-            <button
-                class="btn btn-sm btn-danger"
-                hx-delete="/order/session/{{ s.session_id }}"
-                hx-target="#session-{{ s.session_id }}"
-                hx-swap="outerHTML"
-                hx-confirm="Delete this in-progress session?"
-            >Delete</button>
-            {% if s.status == "ready" %}
-                <span class="badge badge-matched">Ready</span>
-            {% elif s.status == "searching" %}
-                <span class="badge badge-new">Searching</span>
-            {% else %}
-                <span class="badge badge-substituted">Starting</span>
-            {% endif %}
-            <span class="session-card-desc">
-                {% if s.status == "ready" %}
-                    {{ s.total_items }} item{% if s.total_items != 1 %}s{% endif %} ready for review
-                {% elif s.status == "searching" %}
-                    {{ s.searched_count }} of {{ s.total_items }} items searched
-                {% else %}
-                    Fetching your Alexa list…
-                {% endif %}
-            </span>
-            <span class="muted">Started {{ s.created_at.strftime("%-I:%M %p") }}</span>
-        </div>
-    </div>
-    {% endfor %}
-</div>
-{% endif %}
+{% include "partials/active_sessions.html" %}
 
 <div class="start-section">
     <button

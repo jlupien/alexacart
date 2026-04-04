@@ -61,6 +61,7 @@ class ProductOption:
     item_id: str | None = None
     size: str | None = None
     source: str | None = None  # "preference" or "search"
+    previously_purchased: bool = False
 
 
 @dataclass
@@ -366,6 +367,7 @@ async def _apply_search_results(
                 item_id=r.item_id,
                 size=r.size,
                 source="search",
+                previously_purchased=r.previously_purchased,
             )
             for r in in_stock
         ]
@@ -495,6 +497,7 @@ async def _search_single_item(
                             item_id=r.item_id,
                             size=r.size,
                             source="search",
+                            previously_purchased=r.previously_purchased,
                         ))
 
                 # Combine: in-stock preferences → in-stock search results
@@ -687,6 +690,7 @@ async def search_products(request: Request, q: str = Query(...), index: int = Qu
                 "image_url": r.image_url,
                 "item_id": r.item_id,
                 "size": r.size,
+                "previously_purchased": r.previously_purchased,
             }
             for r in results
         ]

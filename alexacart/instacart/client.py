@@ -69,6 +69,7 @@ class ProductResult:
     product_id: str | None = None
     item_id: str | None = None
     size: str | None = None
+    previously_purchased: bool = False
 
 
 class InstacartClient:
@@ -626,6 +627,8 @@ class InstacartClient:
             if self._retailer_slug:
                 product_url += f"?retailerSlug={self._retailer_slug}"
 
+        previously_purchased = "buyItAgain" in (item.get("tags") or [])
+
         return ProductResult(
             product_name=name,
             product_url=product_url,
@@ -636,6 +639,7 @@ class InstacartClient:
             product_id=product_id or None,
             item_id=item_id or None,
             size=size or None,
+            previously_purchased=previously_purchased,
         )
 
     @staticmethod

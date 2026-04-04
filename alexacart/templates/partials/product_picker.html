@@ -12,6 +12,7 @@
                 {% if product.brand %}<span class="brand">{{ product.brand }}</span>{% endif %}
                 <span class="price">{{ product.price or "N/A" }}</span>
                 {% if product.size %}<span class="size">{{ product.size }}</span>{% endif %}
+                {% if product.previously_purchased %}<span class="badge badge-purchased">Previously purchased</span>{% endif %}
             </div>
             <button
                 type="button"

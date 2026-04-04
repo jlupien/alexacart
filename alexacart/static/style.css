@@ -269,6 +269,11 @@ main {
     color: #991b1b;
 }
 
+.badge-purchased {
+    background: #ede9fe;
+    color: #5b21b6;
+}
+
 /* Product thumbnails */
 .product-thumb {
     width: 40px;

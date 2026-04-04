@@ -55,6 +55,7 @@
                     {% if alt.price %}<span class="price">{{ alt.price }}</span>{% endif %}
                     {% if alt.size %}<span class="size">{{ alt.size }}</span>{% endif %}
                     {% if alt.product_url %}<a href="{{ alt.product_url }}" target="_blank" class="product-link" onclick="event.stopPropagation()">view</a>{% endif %}
+                    {% if alt.previously_purchased %}<span class="badge badge-purchased">Previously purchased</span>{% endif %}
                     {% if not alt.in_stock %}<span class="badge badge-error">Out of stock</span>{% endif %}
                 </span>
             </label>

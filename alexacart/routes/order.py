@@ -51,6 +51,22 @@ class OrderStatus(str, Enum):
 
 
 @dataclass
+class _PrefSnapshot:
+    """Plain-Python snapshot of a PreferredProduct row.
+
+    Why: the DB session must close before we make network calls, otherwise
+    parallel searches exhaust the SQLAlchemy connection pool while holding
+    connections across long Instacart API awaits.
+    """
+    id: int
+    product_name: str
+    product_url: str
+    brand: str | None
+    image_url: str | None
+    size: str | None
+
+
+@dataclass
 class ProductOption:
     product_name: str
     product_url: str | None = None
@@ -422,112 +438,137 @@ async def _search_single_item(
     """
     session.active_searches.add(proposal.alexa_text)
     try:
+        # Snapshot DB state under a short-lived session. The connection MUST be
+        # released before any network I/O — otherwise N parallel searches hold
+        # N connections across long Instacart awaits and exhaust the pool.
         with SessionLocal() as db:
             match = find_match(db, proposal.alexa_text)
             proposal.grocery_item_id = match.grocery_item_id
             proposal.grocery_item_name = match.grocery_item_name
-
-            if match.is_known and match.preferred_products:
-                # Fetch ALL preference details + search results in parallel
-                async def _fetch_pref(pref):
-                    """Fetch current details for a single preferred product."""
-                    try:
-                        if not pref.product_url:
-                            return None
-                        result = await client.get_product_details(pref.product_url)
-                        if result:
-                            if result.in_stock:
-                                pref.last_seen_in_stock = datetime.now(UTC)
-                            return ProductOption(
-                                product_name=result.product_name,
-                                product_url=result.product_url or pref.product_url,
-                                brand=result.brand or pref.brand,
-                                price=result.price,
-                                image_url=result.image_url or pref.image_url,
-                                in_stock=result.in_stock,
-                                item_id=result.item_id,
-                                size=result.size or pref.size,
-                                source="preference",
-                            )
-                    except Exception as e:
-                        logger.warning("Failed to fetch pref '%s': %s", pref.product_name, e)
-                    return None
-
-                # Launch all fetches in parallel: each preference + one search
-                pref_tasks = [_fetch_pref(pref) for pref in match.preferred_products]
-                all_results = await asyncio.gather(
-                    *pref_tasks,
-                    client.search_products(proposal.alexa_text),
-                    return_exceptions=True,
+            is_known = match.is_known
+            pref_snapshots = [
+                _PrefSnapshot(
+                    id=p.id,
+                    product_name=p.product_name,
+                    product_url=p.product_url,
+                    brand=p.brand,
+                    image_url=p.image_url,
+                    size=p.size,
                 )
+                for p in match.preferred_products
+            ]
 
-                # Split results: preferences (first N) and search (last one)
-                pref_results = all_results[:-1]
-                search_results_raw = all_results[-1]
+        if is_known and pref_snapshots:
+            # Fetch ALL preference details + search results in parallel
+            async def _fetch_pref(pref: _PrefSnapshot):
+                """Fetch current details for a single preferred product."""
+                try:
+                    if not pref.product_url:
+                        return None
+                    result = await client.get_product_details(pref.product_url)
+                    if result:
+                        return ProductOption(
+                            product_name=result.product_name,
+                            product_url=result.product_url or pref.product_url,
+                            brand=result.brand or pref.brand,
+                            price=result.price,
+                            image_url=result.image_url or pref.image_url,
+                            in_stock=result.in_stock,
+                            item_id=result.item_id,
+                            size=result.size or pref.size,
+                            source="preference",
+                        )
+                except Exception as e:
+                    logger.warning("Failed to fetch pref '%s': %s", pref.product_name, e)
+                return None
 
-                db.commit()  # persist any last_seen_in_stock updates
+            # Launch all fetches in parallel: each preference + one search
+            pref_tasks = [_fetch_pref(pref) for pref in pref_snapshots]
+            all_results = await asyncio.gather(
+                *pref_tasks,
+                client.search_products(proposal.alexa_text),
+                return_exceptions=True,
+            )
 
-                # Build preference options (in-stock only, preserve rank order, skip None/errors)
-                pref_options = []
-                pref_ids = set()  # for de-duping search results
-                for r in pref_results:
-                    if isinstance(r, Exception) or r is None:
+            # Split results: preferences (first N) and search (last one)
+            pref_results = all_results[:-1]
+            search_results_raw = all_results[-1]
+
+            # Build preference options (in-stock only, preserve rank order, skip None/errors)
+            pref_options = []
+            pref_ids = set()  # for de-duping search results
+            in_stock_pref_ids: list[int] = []
+            for snap, r in zip(pref_snapshots, pref_results):
+                if isinstance(r, Exception) or r is None:
+                    continue
+                pref_ids.add(r.item_id)
+                if r.product_url:
+                    pref_ids.add(r.product_url)
+                if r.in_stock:
+                    pref_options.append(r)
+                    in_stock_pref_ids.append(snap.id)
+
+            # Persist last_seen_in_stock in a fresh short-lived session.
+            if in_stock_pref_ids:
+                from alexacart.models import PreferredProduct
+                with SessionLocal() as db:
+                    db.query(PreferredProduct).filter(
+                        PreferredProduct.id.in_(in_stock_pref_ids)
+                    ).update(
+                        {"last_seen_in_stock": datetime.now(UTC)},
+                        synchronize_session=False,
+                    )
+                    db.commit()
+
+            # Build search options, de-duped against preferences, in-stock only
+            search_options = []
+            if isinstance(search_results_raw, list):
+                for r in search_results_raw:
+                    if not r.in_stock:
                         continue
-                    pref_ids.add(r.item_id)
-                    if r.product_url:
-                        pref_ids.add(r.product_url)
-                    if r.in_stock:
-                        pref_options.append(r)
+                    if r.item_id in pref_ids or (r.product_url and r.product_url in pref_ids):
+                        continue
+                    search_options.append(ProductOption(
+                        product_name=r.product_name,
+                        product_url=r.product_url,
+                        brand=r.brand,
+                        price=r.price,
+                        image_url=r.image_url,
+                        in_stock=r.in_stock,
+                        item_id=r.item_id,
+                        size=r.size,
+                        source="search",
+                        previously_purchased=r.previously_purchased,
+                    ))
 
-                # Build search options, de-duped against preferences, in-stock only
-                search_options = []
-                if isinstance(search_results_raw, list):
-                    for r in search_results_raw:
-                        if not r.in_stock:
-                            continue
-                        if r.item_id in pref_ids or (r.product_url and r.product_url in pref_ids):
-                            continue
-                        search_options.append(ProductOption(
-                            product_name=r.product_name,
-                            product_url=r.product_url,
-                            brand=r.brand,
-                            price=r.price,
-                            image_url=r.image_url,
-                            in_stock=r.in_stock,
-                            item_id=r.item_id,
-                            size=r.size,
-                            source="search",
-                            previously_purchased=r.previously_purchased,
-                        ))
+            # Combine: in-stock preferences → in-stock search results
+            all_options = pref_options + search_options
 
-                # Combine: in-stock preferences → in-stock search results
-                all_options = pref_options + search_options
+            if all_options:
+                best = all_options[0]
+                proposal.product_name = best.product_name
+                proposal.product_url = best.product_url
+                proposal.brand = best.brand
+                proposal.price = best.price
+                proposal.image_url = best.image_url
+                proposal.item_id = best.item_id
+                proposal.size = best.size
+                proposal.in_stock = best.in_stock
+                proposal.alternatives = all_options
 
-                if all_options:
-                    best = all_options[0]
-                    proposal.product_name = best.product_name
-                    proposal.product_url = best.product_url
-                    proposal.brand = best.brand
-                    proposal.price = best.price
-                    proposal.image_url = best.image_url
-                    proposal.item_id = best.item_id
-                    proposal.size = best.size
-                    proposal.in_stock = best.in_stock
-                    proposal.alternatives = all_options
-
-                    if pref_options:
-                        proposal.status = "Matched"
-                        proposal.status_class = "matched"
-                    else:
-                        proposal.status = "Substituted"
-                        proposal.status_class = "substituted"
+                if pref_options:
+                    proposal.status = "Matched"
+                    proposal.status_class = "matched"
                 else:
-                    proposal.status = "No results"
-                    proposal.status_class = "error"
+                    proposal.status = "Substituted"
+                    proposal.status_class = "substituted"
             else:
-                await _apply_search_results(
-                    proposal, client, proposal.alexa_text, "New item", "new",
-                )
+                proposal.status = "No results"
+                proposal.status_class = "error"
+        else:
+            await _apply_search_results(
+                proposal, client, proposal.alexa_text, "New item", "new",
+            )
 
     except Exception as e:
         logger.error("Search failed for '%s': %s", proposal.alexa_text, e)

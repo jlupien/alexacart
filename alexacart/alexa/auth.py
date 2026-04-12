@@ -18,8 +18,6 @@ import base64
 import hashlib
 import json
 import logging
-import os
-import signal
 import secrets
 from datetime import UTC, datetime
 from pathlib import Path
@@ -772,23 +770,9 @@ async def _extract_and_save_cookies(browser, _status) -> dict:
 
 def _kill_chrome_for_profile(profile_dir: Path) -> bool:
     """Kill any lingering Chrome processes using the specified profile directory."""
-    import subprocess
+    from alexacart.process import find_and_kill_chrome
 
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", f"--user-data-dir={profile_dir}"],
-            capture_output=True,
-            text=True,
-        )
-        pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
-        if not pids:
-            return False
-        logger.info("Killing %d lingering Chrome process(es): %s", len(pids), pids)
-        subprocess.run(["kill", "-9"] + pids, capture_output=True)
-        return True
-    except Exception as e:
-        logger.debug("Chrome cleanup: %s", e)
-        return False
+    return find_and_kill_chrome(profile_dir, force=True)
 
 
 def _clean_profile_locks(profile_dir: Path) -> bool:
@@ -843,8 +827,10 @@ def _stop_browser(browser, profile_dir: Path) -> None:
     except Exception:
         pass
     if chrome_pid:
+        from alexacart.process import kill_pid
+
         try:
-            os.kill(chrome_pid, signal.SIGKILL)
+            kill_pid(chrome_pid, force=True)
             logger.info("Force-killed Chrome process %d", chrome_pid)
         except ProcessLookupError:
             pass  # Already exited cleanly after browser.stop()

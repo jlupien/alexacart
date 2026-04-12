@@ -16,7 +16,8 @@ Automate your grocery ordering: read your Alexa shopping list, match items to In
 ### Prerequisites
 
 - Python 3.11+
-- [uv](https://docs.astral.sh/uv/) package manager (`brew install uv`)
+- [uv](https://docs.astral.sh/uv/) package manager (`brew install uv` on macOS, `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"` on Windows)
+- Google Chrome (used by nodriver for login automation)
 
 ### Install
 
@@ -106,6 +107,41 @@ bash scripts/restart-launchagent.sh
 
 ```bash
 bash scripts/uninstall-launchagent.sh
+```
+
+### Run at Login (Windows)
+
+Use Task Scheduler to start the server automatically:
+
+1. Open **Task Scheduler** (`taskschd.msc`)
+2. Click **Create Task** (not "Create Basic Task")
+3. **General** tab:
+   - Name: `AlexaCart`
+   - Check "Run only when user is logged on"
+4. **Triggers** tab → New:
+   - Begin the task: **At log on**
+   - Specific user: your account
+5. **Actions** tab → New:
+   - Action: **Start a program**
+   - Program/script: path to `uv.exe` (e.g. `C:\Users\YOU\.local\bin\uv.exe` — run `where uv` to find it)
+   - Add arguments: `run python run.py`
+   - Start in: path to your alexacart checkout (e.g. `C:\Users\YOU\Code\alexacart`)
+6. **Settings** tab:
+   - Uncheck "Stop the task if it runs longer than"
+   - Check "If the task fails, restart every" → 1 minute, up to 3 times
+7. Click **OK**
+
+**Managing the task:**
+
+```powershell
+# Start
+schtasks /Run /TN "AlexaCart"
+
+# Stop
+schtasks /End /TN "AlexaCart"
+
+# Delete
+schtasks /Delete /TN "AlexaCart" /F
 ```
 
 ## Usage

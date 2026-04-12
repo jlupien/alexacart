@@ -13,8 +13,6 @@ import logging
 import os
 import signal
 import shutil
-import subprocess
-
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import func
@@ -30,19 +28,11 @@ logger = logging.getLogger(__name__)
 
 def _kill_nodriver_chromes():
     """Kill any Chrome processes spawned by nodriver for our profile dirs."""
+    from alexacart.process import find_and_kill_chrome
+
     for profile_name in ("nodriver-amazon", "nodriver-instacart"):
         profile_dir = settings.resolved_local_data_dir / profile_name
-        try:
-            result = subprocess.run(
-                ["pgrep", "-f", str(profile_dir)],
-                capture_output=True, text=True, timeout=5,
-            )
-            pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
-            if pids:
-                logger.info("Killing %d Chrome process(es) for %s", len(pids), profile_name)
-                subprocess.run(["kill", "-9"] + pids, capture_output=True, timeout=5)
-        except Exception as e:
-            logger.debug("Chrome cleanup for %s: %s", profile_name, e)
+        find_and_kill_chrome(profile_dir, force=True)
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 

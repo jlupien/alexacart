@@ -14,7 +14,6 @@ API and page script scanning if the interceptor misses anything.
 import asyncio
 import json
 import logging
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 from alexacart.config import settings
@@ -509,25 +508,9 @@ def _cleanup_stale_chrome(profile_dir: Path) -> None:
     When nodriver fails to connect after spawning Chrome, the process stays
     alive and holds the profile lock, blocking all future launches.
     """
-    import signal
-    import subprocess
+    from alexacart.process import find_and_kill_chrome
 
-    # Kill Chrome processes referencing this profile directory
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", str(profile_dir)],
-            capture_output=True, text=True, timeout=5,
-        )
-        for pid_str in result.stdout.strip().split("\n"):
-            if pid_str.strip():
-                try:
-                    pid = int(pid_str.strip())
-                    os.kill(pid, signal.SIGTERM)
-                    logger.info("Killed orphaned Chrome process %d for %s", pid, profile_dir.name)
-                except (ValueError, ProcessLookupError, PermissionError):
-                    pass
-    except Exception as e:
-        logger.debug("Chrome cleanup pgrep failed: %s", e)
+    find_and_kill_chrome(profile_dir)
 
     # Remove stale lock files so a new Chrome instance can start
     for lock_file in profile_dir.glob("Singleton*"):

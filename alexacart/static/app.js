@@ -108,7 +108,8 @@ function selectProduct(index, productName, price, imageUrl, productUrl, brand, i
     optionsDiv.appendChild(label);
 
     // Update status badge
-    var badge = row.querySelector('.badge');
+    var statusEl = document.getElementById('status-' + index);
+    var badge = statusEl ? statusEl.querySelector('.badge') : null;
     if (badge) {
         badge.className = 'badge badge-matched';
         badge.textContent = 'Selected';
@@ -144,7 +145,8 @@ function selectAlternative(index, radio) {
     radio.closest('.product-option').classList.add('selected');
 
     // Update status badge
-    var badge = row.querySelector('.badge');
+    var statusEl = document.getElementById('status-' + index);
+    var badge = statusEl ? statusEl.querySelector('.badge') : null;
     if (badge) {
         if (radio.value === '0') {
             // Restoring original proposed product — restore original status
@@ -173,7 +175,8 @@ function toggleSkip(index) {
     var skipOpt = row.querySelector('.skip-option');
     if (skipOpt) skipOpt.classList.add('selected');
 
-    var badge = row.querySelector('.badge');
+    var statusEl = document.getElementById('status-' + index);
+    var badge = statusEl ? statusEl.querySelector('.badge') : null;
     if (badge) {
         badge.className = 'badge badge-substituted';
         badge.textContent = 'Skipped';

@@ -462,24 +462,28 @@ async def _search_single_item(
             # Fetch ALL preference details + search results in parallel
             async def _fetch_pref(pref: _PrefSnapshot):
                 """Fetch current details for a single preferred product."""
-                try:
-                    if not pref.product_url:
-                        return None
-                    result = await client.get_product_details(pref.product_url)
-                    if result:
-                        return ProductOption(
-                            product_name=result.product_name,
-                            product_url=result.product_url or pref.product_url,
-                            brand=result.brand or pref.brand,
-                            price=result.price,
-                            image_url=result.image_url or pref.image_url,
-                            in_stock=result.in_stock,
-                            item_id=result.item_id,
-                            size=result.size or pref.size,
-                            source="preference",
+                if not pref.product_url:
+                    return None
+                for attempt in range(2):
+                    try:
+                        result = await client.get_product_details(pref.product_url)
+                        if result:
+                            return ProductOption(
+                                product_name=result.product_name,
+                                product_url=result.product_url or pref.product_url,
+                                brand=result.brand or pref.brand,
+                                price=result.price,
+                                image_url=result.image_url or pref.image_url,
+                                in_stock=result.in_stock,
+                                item_id=result.item_id,
+                                size=result.size or pref.size,
+                                source="preference",
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to fetch pref '%s' (attempt %d): %s",
+                            pref.product_name, attempt + 1, e,
                         )
-                except Exception as e:
-                    logger.warning("Failed to fetch pref '%s': %s", pref.product_name, e)
                 return None
 
             # Launch all fetches in parallel: each preference + one search
@@ -494,12 +498,53 @@ async def _search_single_item(
             pref_results = all_results[:-1]
             search_results_raw = all_results[-1]
 
+            # Index search results by product_id for fast lookup when promoting
+            # failed prefs that happened to appear in search results anyway.
+            search_by_product_id: dict[str, object] = {}
+            if isinstance(search_results_raw, list):
+                for sr in search_results_raw:
+                    if sr.product_id:
+                        search_by_product_id[sr.product_id] = sr
+
+            def _product_id_from_url(url: str | None) -> str | None:
+                """Extract the numeric product ID from an Instacart product URL."""
+                if not url:
+                    return None
+                slug = url.rstrip("/").split("/")[-1].split("?")[0]
+                part = slug.split("-")[0]
+                return part if part.isdigit() else None
+
             # Build preference options (in-stock only, preserve rank order, skip None/errors)
             pref_options = []
             pref_ids = set()  # for de-duping search results
             in_stock_pref_ids: list[int] = []
             for snap, r in zip(pref_snapshots, pref_results):
                 if isinstance(r, Exception) or r is None:
+                    # Pref fetch failed — check if this product appeared in search
+                    # results anyway and promote it to the preferences section.
+                    pid = _product_id_from_url(snap.product_url)
+                    sr = search_by_product_id.get(pid) if pid else None
+                    if sr and sr.in_stock:
+                        promoted = ProductOption(
+                            product_name=sr.product_name or snap.product_name,
+                            product_url=sr.product_url or snap.product_url,
+                            brand=sr.brand or snap.brand,
+                            price=sr.price,
+                            image_url=sr.image_url or snap.image_url,
+                            in_stock=True,
+                            item_id=sr.item_id,
+                            size=sr.size or snap.size,
+                            source="preference",
+                            previously_purchased=sr.previously_purchased,
+                        )
+                        pref_options.append(promoted)
+                        in_stock_pref_ids.append(snap.id)
+                        if sr.item_id:
+                            pref_ids.add(sr.item_id)
+                        if sr.product_url:
+                            pref_ids.add(sr.product_url)
+                    elif snap.product_url:
+                        pref_ids.add(snap.product_url)
                     continue
                 pref_ids.add(r.item_id)
                 if r.product_url:

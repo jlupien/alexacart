@@ -1,12 +1,20 @@
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
-    alexa_list_name: str = "Grocery List"
+    # Comma-separated list of Alexa list names to pull items from.
+    # Stored as str so pydantic-settings reads it as a plain string (not JSON).
+    # Use the alexa_list_names property for the parsed list[str] form.
+    alexa_list_names_csv: str = Field("Grocery List", validation_alias="alexa_list_names")
+
+    @property
+    def alexa_list_names(self) -> list[str]:
+        return [x.strip() for x in self.alexa_list_names_csv.split(",") if x.strip()]
     instacart_store: str = "Wegmans"
     skip_alexa_checkoff: bool = False
     debug_clear_amazon_cookies: bool = False

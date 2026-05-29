@@ -305,7 +305,8 @@ async def _run_order(session: OrderSession):
                 return
 
             if not items:
-                session.error = "No items found on your Alexa Grocery List. Add some items via Alexa and try again."
+                list_label = ", ".join(f'"{n}"' for n in settings.alexa_list_names)
+                session.error = f"No items found on your Alexa list ({list_label}). Add some items via Alexa and try again."
                 session.status = OrderStatus.ERROR
                 return
 

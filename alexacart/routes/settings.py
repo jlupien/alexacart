@@ -111,7 +111,7 @@ async def settings_page(request: Request, db: Session = Depends(get_db)):
         "db_stats": db_stats,
         "config": {
             "instacart_store": settings.instacart_store,
-            "alexa_list_name": settings.alexa_list_name,
+            "alexa_list_names": settings.alexa_list_names,
             "data_dir": str(settings.resolved_data_dir),
             "local_data_dir": str(settings.resolved_local_data_dir),
         },

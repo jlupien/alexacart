@@ -163,8 +163,8 @@
             <td>{{ config.instacart_store }}</td>
         </tr>
         <tr>
-            <td class="settings-label">Alexa list</td>
-            <td>{{ config.alexa_list_name }}</td>
+            <td class="settings-label">Alexa lists</td>
+            <td>{{ config.alexa_list_names | join(", ") }}</td>
         </tr>
         <tr>
             <td class="settings-label">Data directory</td>

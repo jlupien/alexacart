@@ -190,27 +190,64 @@ class AlexaClient:
         return resp
 
     @staticmethod
-    def _extract_list_items(data: dict) -> list[dict]:
-        """Extract the list items from the API response (nested structure)."""
-        # The response contains a nested dict with a 'listItems' key
-        for key in data:
-            val = data[key]
-            if isinstance(val, dict) and "listItems" in val:
-                return val["listItems"]
-        # Fallback: try top-level listItems
-        if "listItems" in data:
-            return data["listItems"]
-        logger.warning("Could not find listItems in response keys: %s", list(data.keys()))
-        return []
+    def _list_name_matches(list_info: dict, name: str) -> bool:
+        """Return True if list_info corresponds to the requested list name.
 
-    async def get_items(self, list_id: str | None = None) -> list[AlexaListItem]:
-        """Fetch active (uncompleted) items from the Alexa shopping list."""
+        "Shopping List" is a special sentinel for the built-in default list,
+        which has listType == "SHOPPING_LIST" and an empty listName.
+        """
+        if list_info.get("listName") == name:
+            return True
+        if name == "Shopping List" and list_info.get("listType") == "SHOPPING_LIST":
+            return True
+        return False
+
+    def _extract_items_from_lists(self, data: dict, list_names: list[str]) -> list[dict]:
+        """Return raw items from all lists whose name matches list_names."""
+        raw_items: list[dict] = []
+        matched_lists: list[str] = []
+
+        for val in data.values():
+            if not isinstance(val, dict) or "listItems" not in val:
+                continue
+            list_info = val.get("listInfo", {})
+            if any(self._list_name_matches(list_info, name) for name in list_names):
+                display_name = list_info.get("listName") or (
+                    "Shopping List" if list_info.get("listType") == "SHOPPING_LIST" else list_info.get("listType", "unknown")
+                )
+                matched_lists.append(display_name)
+                raw_items.extend(val["listItems"])
+
+        if matched_lists:
+            logger.info("Matched lists: %s (%d total items)", matched_lists, len(raw_items))
+        else:
+            logger.warning(
+                "No lists matched %s — available: %s",
+                list_names,
+                [v.get("listInfo", {}).get("listName") or v.get("listInfo", {}).get("listType")
+                 for v in data.values() if isinstance(v, dict) and "listInfo" in v],
+            )
+            # Fallback: return items from the first list found
+            for val in data.values():
+                if isinstance(val, dict) and "listItems" in val:
+                    raw_items = val["listItems"]
+                    break
+
+        return raw_items
+
+    async def get_items(self, list_names: list[str] | None = None) -> list[AlexaListItem]:
+        """Fetch active (uncompleted) items from one or more Alexa lists."""
+        from alexacart.config import settings
+
+        if list_names is None:
+            list_names = settings.alexa_list_names
+
         resp = await self._request_with_retry("GET", f"{API_BASE}/getlistitems")
         resp.raise_for_status()
         data = resp.json()
 
-        raw_items = self._extract_list_items(data)
-        logger.info("API returned %d total items", len(raw_items))
+        raw_items = self._extract_items_from_lists(data, list_names)
+        logger.info("API returned %d total items across requested lists", len(raw_items))
 
         items = []
         for item in raw_items:
@@ -226,7 +263,7 @@ class AlexaClient:
                     )
                 )
 
-        logger.info("Found %d active items on Alexa list", len(items))
+        logger.info("Found %d active items across requested lists", len(items))
         return items
 
     async def mark_complete(self, item: AlexaListItem) -> bool:

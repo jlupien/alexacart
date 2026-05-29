@@ -44,7 +44,7 @@ DATA_DIR=
 # Always local per machine (do NOT sync this)
 LOCAL_DATA_DIR=
 
-ALEXA_LIST_NAME=Grocery List
+ALEXA_LIST_NAMES=Grocery List,Shopping List
 INSTACART_STORE=Wegmans
 
 # When debugging, you can skip checking off list items
@@ -61,7 +61,7 @@ INSTACART_STORE=Wegmans
 |----------|-------------|---------|
 | `DATA_DIR` | Where the SQLite DB is stored (preferences, aliases, order log). Set to a synced folder (e.g. Dropbox) to share preferences across machines. | `./data/` |
 | `LOCAL_DATA_DIR` | Where login cookies and nodriver browser profiles are stored. Always local per machine. | `./data/` |
-| `ALEXA_LIST_NAME` | Name of your Alexa shopping list | `Grocery List` |
+| `ALEXA_LIST_NAMES` | Comma-separated Alexa list names to pull items from. Use `Shopping List` for the built-in default list. | `Grocery List` |
 | `INSTACART_STORE` | Instacart store to search (must match the store name on Instacart) | `Wegmans` |
 | `SKIP_ALEXA_CHECKOFF` | Skip checking off items on the Alexa list after commit (useful for debugging) | `false` |
 | `DEBUG_CLEAR_AMAZON_COOKIES` | Clear Amazon cookies + Chrome profile on each order start (forces re-login) | `false` |
